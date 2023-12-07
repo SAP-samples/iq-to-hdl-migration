@@ -1,0 +1,30 @@
+{"Host_Name": "<(Coordinator / Simplex server) hostname>",
+"Port_Number": Port number of (SAP IQ coordinator / SAP IQ simplex server),
+"DBA_User": "<DBA user name>",
+"DBA_Pwd": "<Optional: DBA user password.Please provide the value or empty string as shown in ReadMe files.>",
+"Extract_Path": "<Shared directory to store the data extracted during migration>",
+"Client_Num_Conn": "<Number of SAP IQ client connections to extract data. Provide integer value without quotes>",
+"IQ_Server_On_Same_Host": "<SAP IQ Server / Coordinator and SAP data lake client installed on same Host or not, Valid values:(Yes/No)>",
+"IQ_Host_Login_Id":"<Optional: SAP IQ host login id to establish an ssh connection if your installations of SAP IQ Server and the migration utility (17.1 data lake client installation) are on different hosts.Please provide the value or empty string as shown in ReadMe files.>",
+"IQ_Host_Login_Pwd":"<Optional: SAP IQ host login password to establish an ssh connection if your installations of SAP IQ Server and the migration utility (17.1 data lake client installation) are on different hosts.Please provide the value or empty string as shown in ReadMe files.>",
+"IQ_Version": "<Your major SAP IQ version in use: Should be either SAP IQ 16.0 or 16.1>",
+"IQ_Server_Install_Path": "<Path of SAP IQ Server installation directory>",
+"ENC": "<Optional: ENC string based on Encryption setting on SAP IQ server (None/Simple/TLS(<TLS Options>)).Please provide the value or empty string as shown in ReadMe files.>",
+"Batch_Size_GB": "<Optional: Batch size in GB if batch extraction is enabled, else set it to 0 or leave this parameter unchanged to go with normal (non-batch) extraction mode>",
+"Datalake_Client_Install_Path": "<Path of 17.1 SAP data lake client installation directory>",
+"HDLADMIN_User": "<HDLADMIN user name>",
+"HDLADMIN_Pwd": "<Optional: HDLADMIN password.Please provide the value or empty string as shown in ReadMe files.>",
+"HDL_Coord_Endpoint": "<Coordinator endpoint of the data lake instance>",
+"HDL_Writer_Endpoint": "<Writer endpoint of the data lake instance>",
+"HDL_Num_Writer_Conn": "<Total number of client connections to the writer node in data lake to load data into it. Provide integer value without quotes>",
+"HDL_Num_Coord_Conn": "<Optional:Total number of client connections to the coordinator node in data lake to load data into it. Provide integer value without quotes or empty string as shown in ReadMe files.>",
+"Object_Store_Copy_Validation": "No",
+"Hyperscaler_Details": {
+    "Name": "Azure",
+    "Credentials": {
+         "Azure_Account_Name": "<Azure Account Name>",
+         "Azure_Account_Key" : "<Azure Account Key>",
+         "Container_Name"    : "<Object store Container Name>"
+        }
+    }
+}
