@@ -2,8 +2,7 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/SAP-samples/iq-to-hdl-migration)](https://api.reuse.software/info/github.com/SAP-samples/iq-to-hdl-migration)
 
 ## Description
-This is SAP IQ to SAP Hana Cloud, Data Lake Migration Utility. These sample utilities can be used to Migrate existing Schema and Data of SAP IQ to SAP Hana Cloud Data Lake.
-It has 2 different utilities.
+This is a utility for SAP IQ to SAP HANA Cloud, Data Lake migration. These sample utilities can be used to migrate existing schema and data of SAP IQ to SAP HANA Cloud Data Lake. It has 2 different utilities.
 
 1. Pre-Migration utility - The pre-migration utility identifies incompatible features, artifacts, server options, users etc. in your existing on-premise SAP IQ database before migrating it to SAP HANA Cloud, Data Lake.
 
