@@ -649,3 +649,16 @@ HDL_AWS_S3_CLIENT_POOL_LIMIT
 CORE_Options180
 CORE_Options181
 CORE_Options182
+CORE_Options184
+CORE_Options190
+CORE_Options191
+CORE_Options192
+CORE_Options193
+CORE_Options194
+CORE_Options196
+MPX_STATUS_EVENT_TIMEOUT
+Wide_Table_NCol_CutOff
+CORE_Options197
+VP_Parallel_Col_Fetch_Max_ThreadReq
+VP_Parallel_Col_Fetch_Min_Threads
+CORE_Options198
