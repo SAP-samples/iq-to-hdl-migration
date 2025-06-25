@@ -1,0 +1,22 @@
+{
+"Datalake_Client_Install_Path": "<Path of 17.1 data lake Relational Engine client installation directory>",
+"Extract_Path": "<Shared directory to store the data extracted during migration>",
+
+"_comment": "Directory_Name value should be the same value as in migration_config.json",
+"HDLFS_Configuration": {
+    "Directory_Name" : "<Directory_Name where extracted data to be copied. Provide string value as shown in ReadMe files. It cannot be empty string.>",
+    "Files_endpoint" : "<HDLFS Files endpoint>",
+    "Cert_path"      : "<HDLFS Certificate path>",
+    "Key_path"       : "<HDLFS Key path>"
+   },
+
+"HDLADMIN_User": "<HDLADMIN user name>",
+"HDLADMIN_Pwd": "<Optional: HDLADMIN password.Please provide the value or empty string as shown in ReadMe files.>",
+
+"HDL_Coord_Endpoint": "<Coordinator endpoint of the data lake Relational Engine instance>",
+"HDL_Worker_Endpoint": "<Worker endpoint of the data lake Relational Engine instance>",
+
+"HDL_Num_Worker_Conn": "<Total number of client connections to the worker node in data lake Relational Engine to load data into it. Provide integer value without quotes>",
+"HDL_Num_Coord_Conn": "<Optional:Total number of client connections to the coordinator node in data lake Relational Engine to load data into it. Provide integer value without quotes or empty string as shown in ReadMe files.>",
+"Object_Store_Copy_Validation": "<Object store validation for copied objects, Valid values:(Yes/No)>"
+}

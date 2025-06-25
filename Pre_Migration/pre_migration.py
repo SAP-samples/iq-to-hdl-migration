@@ -18,6 +18,7 @@ import json
 import sys,getopt
 from sys import byteorder
 import platform
+import psutil
 import sys
 argv = sys.argv[1:]
 
@@ -65,6 +66,7 @@ def get_inputs(config_file):
 
     common.get_inputs(config_file,'pre_migration')
     common.host_validation(config_file,'pre_migration')
+    common.premig_inputs(config_file,'pre_migration')
     log_file.info("IQ Server Hostname : %s\n"%(common.hostname))
     log_file.info("Client Hostname : %s , ip-address : %s , full-hostname : %s\n"%(common.host,common.ipaddress,common.fullhostname))
 
@@ -75,6 +77,20 @@ def get_inputs(config_file):
     elap_sec = common.elap_time(strt)
     log_file.info("%s"%(common.dividerline))
     log_file.info("Reading and Verification of config file : \n%s completed in %s seconds"%(config_file,elap_sec))
+
+def get_size(bytes, suffix="B"):
+    """
+    Scale bytes to its proper format
+    e.g:
+        1253656 => '1.20MB'
+        1253656678 => '1.17GB'
+    """
+    factor = 1024
+    for unit in ["", "K", "M", "G", "T", "P"]:
+        if bytes < factor:
+            return "{:.2f}{}{}".format(bytes, unit, suffix)
+        bytes /= factor
+
 
 # Verify the dbspaces present in DB.
 def dbspace_verify(conn):
@@ -89,7 +105,7 @@ def dbspace_verify(conn):
     cursor.execute("select count(*) from sp_iqdbspace() where DBSpaceType='MAIN';")
     count = cursor.fetchone()[0]
     if count > 1:
-        features_list.append(('Multiple_DBSpaces', 'Warning', 'To be merged into one dbspace'))
+        features_list.append(('Multiple_DBSpaces', f'To be merged into one dbspace.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -108,10 +124,6 @@ def dbspacesize_verify(conn):
     output_logging('IQ_SYSTEM_MAIN DBSPACE USAGE','%s GB'%(round(systemDbUsage,3)))
 
     output_logging('USER DBSPACES USAGE','%s GB'%(round(userDbUsage,3)))
-
-    output_logging('COORD TEMP DBSPACES USAGE','%s GB'%(round(tempDbUsage,3)))
-
-    output_logging('SHARED TEMP DBSPACES USAGE','%s GB'%(round(sharedTempDbUsage,3)))
 
     elap_sec = common.elap_time(strt)
     log_file.info("\nVerification of the dbspace size completed in %s seconds"%(elap_sec))
@@ -173,10 +185,17 @@ def dbproperties_verify(conn):
 
     cursor = conn.cursor()
     cursor.execute("set temporary option STRING_RTRUNCATION = 'off'")
-    # Page Size check
-    cursor.execute("select db_property('PageSize');")
-    pagesize = cursor.fetchone()[0]
-    output_logging('PAGE SIZE','%s BYTES'%(pagesize))
+
+    # Server Type and No. of writers
+    cursor.execute("select count(*) from sp_iqmpxinfo()")
+    server_count = cursor.fetchone()[0]
+    if server_count > 0 :
+        output_logging('SERVER TYPE', 'MULTIPLEX') 
+        cursor.execute("select count(*) from sp_iqmpxinfo() where role='writer'")
+        wcount = cursor.fetchone()[0]
+        output_logging('MPX WRITERS PRESENT', '%s'%(wcount))
+    else:
+        output_logging('SERVER TYPE', 'SIMPLEX')
 
     # Database CHAR Collation check
     cursor.execute("select db_property('Collation');")
@@ -188,64 +207,24 @@ def dbproperties_verify(conn):
     caseSensitive = cursor.fetchone()[0]
     output_logging('CASESENSITIVE','%s'%(caseSensitive))
 
-    # NCHAR Collation check
-    cursor.execute("select db_property('NCHARCollation');")
-    ncharcollation = cursor.fetchone()[0]
-    output_logging('NCHAR COLLATION','%s'%(ncharcollation))
-
-    # Nchar CaseSensitivity check
-    cursor.execute("select UPPER(DB_EXTENDED_PROPERTY( 'NcharCollation', 'CaseSensitivity'))")
-    caseSensitivity = cursor.fetchone()[0]
-    output_logging('NCHAR CASESENSITIVITY','%s'%(caseSensitivity))
-
-    # Nchar AccentSensitivity check
-    cursor.execute("select UPPER(DB_EXTENDED_PROPERTY( 'NcharCollation', 'AccentSensitivity'))")
-    accentSensitivity = cursor.fetchone()[0]
-    output_logging('NCHAR ACCENTSENSITIVITY','%s'%(accentSensitivity))
-
-    # Nchar PunctuationSensitivity check
-    cursor.execute("select UPPER(DB_EXTENDED_PROPERTY( 'NcharCollation', 'PunctuationSensitivity'))")
-    punctuationSensitivity = cursor.fetchone()[0]
-    output_logging('NCHAR PUNCTUATIONSENSITIVITY','%s'%(punctuationSensitivity))
-
-    # Nchar SortType check
-    cursor.execute("select UPPER(DB_EXTENDED_PROPERTY( 'NcharCollation', 'SortType'))")
-    sortType = cursor.fetchone()[0]
-    if sortType:
-        output_logging('NCHAR SORTTYPE','%s'%(sortType))
-
-    # Nchar Locale check
-    cursor.execute("select DB_EXTENDED_PROPERTY( 'NcharCollation', 'Specification' )")
-    locale = cursor.fetchone()[0]
-    ncharLocale = (locale.partition("Locale=")[2].partition(";")[0] or locale.partition("Locale=")[2].partition(")")[0])
-    if ncharLocale:
-        output_logging('NCHAR LOCALE','%s'%(ncharLocale))
-
     # Blank Padding check
-    cursor.execute("select trim( db_property( 'BlankPadding' ));")
-    blankpadding = cursor.fetchone()[0]
-    output_logging('BLANK PADDING','%s'%(blankpadding))
+    #cursor.execute("select trim( db_property( 'BlankPadding' ));")
+    #blankpadding = cursor.fetchone()[0]
+    #output_logging('BLANK PADDING','%s'%(blankpadding))
 
     # Database Encryption check
-    cursor.execute("select db_property('Encryption');")
-    encryption = cursor.fetchone()[0]
-    output_logging('DB Encryption','%s'%(encryption))
+    #cursor.execute("select db_property('Encryption');")
+    #encryption = cursor.fetchone()[0]
+    #output_logging('DB Encryption','%s'%(encryption))
 
     # IQ Page Size check
-    cursor.execute("select substring(Value, 1,charindex('/', Value)-1) from  sp_iqstatus() where Name like '%Page Size%';")
-    iqpagesize = cursor.fetchone()[0]
-    output_logging('IQ PAGE SIZE','%s BYTES'%(iqpagesize))
+    #cursor.execute("select substring(Value, 1,charindex('/', Value)-1) from  sp_iqstatus() where Name like '%Page Size%';")
+    #iqpagesize = cursor.fetchone()[0]
+    #output_logging('IQ PAGE SIZE','%s BYTES'%(iqpagesize))
 
     # Endianess check
-    output_logging('ENDIANESS','%s'%(byteorder))
+    #output_logging('ENDIANESS','%s'%(byteorder))
 
-    # Charset check
-    cursor.execute("select trim( db_property( 'Charset' ));")
-    charset = cursor.fetchone()[0]
-    output_logging('CHARSET','%s'%(charset))
-    if charset == "Extended_UNIX_Code_Packed_Format_for_Japanese":
-        features_list.append(('CHARSET', 'Warning', '%s to be replaced by EUC-JP'%(charset)))
-        charset = "EUC-JP"
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -265,7 +244,7 @@ def rlv_verify(conn):
     rlv_dbspace_count = cursor.fetchone()[0]
 
     if (rlv_table_count != 0) or (rlv_dbspace_count != 0) :
-        features_list.append(('RLV_Support', 'Error', 'To be disabled'))
+        action_required_list.append(('RLV_Support', f'RLV is not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -282,9 +261,12 @@ def verify_iq_version(conn):
     # IQ version verification
     cursor.execute("select @@version")
     ver = cursor.fetchone()[0]
-    version = re.search('16.0|16.1', ver)
+    version = re.search('16.1', ver)
     if not version:
-        features_list.append(('Current_IQ_Version', 'Fatal', 'Upgrade required'))
+        action_required_list.append(('Current_IQ_Version not 16.1', f'Upgrade required as Paralellization in extraction is not supported in below IQ versions.'))
+    #if 'SAP IQ/16.0.' in ver:
+        #Document link needs to be updated with HDLFS not supported for IQ below 16.0 version
+        #features_list.append(('Current_IQ_Version', f'Not Supported with HDLFS, Upgrade to 16.1_SP01 required.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -302,7 +284,7 @@ def verify_HSR(conn):
     cursor.execute("select db_property('ReplicationEnabled')")
     enabled = cursor.fetchone()[0]
     if enabled == "Yes":
-        features_list.append(('HSR_Enabled', 'Error', 'To be disabled'))
+        action_required_list.append(('HSR_Enabled', f'To be disabled.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -318,7 +300,8 @@ def verify_encryptiondb(conn):
     cursor.execute("select db_property('Encryption')")
     encryptiondb = cursor.fetchone()[0]
     if encryptiondb != 'None':
-        features_list.append(('DB_Encryption', 'Warning', 'On-prem encryption key will not work in HDL.'))
+        # Document link need to be updated with this information
+        features_list.append(('DB_Encryption Enabled', f'On-prem encryption key will not work in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -335,9 +318,9 @@ def verify_sap_supported_remote_services(conn):
     rows = cursor.fetchall()
     for i in rows:
         if i[0] not in supported_list:
-            features_list.append(('Non SAP remote-source: %s'%(i[0]), 'Error', 'To be deleted'))
+            features_list.append(('Non-SAP remote source', f'HDLRE does not have access to clients for non-SAP data sources.'))
         elif i[0] in supported_list:
-            features_list.append(('SAP remote-source: %s'%(i[0]), 'Warning', 'Automated migration of SAP(ASE,HANA,IQ,SA) remote sources is not supported'))
+            action_required_list.append(('SAP remote source', f'Automated migration of SAP(ASE, HANA, IQ, SQL Anywhere) remote sources is not supported.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -353,13 +336,13 @@ def external_udf_verify(conn):
     cursor.execute("select count(*) from sys.sysprocedure where proc_defn like '%external name%';")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('External_UDF', 'Error', 'To be deleted'))
+        action_required_list.append(('External_UDF', f'External UDFs not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
     log_file.info("\nVerification of external udf completed in %s seconds"%(elap_sec))
 
-# Check if reserved HDL users are in use (saptu, sapsupport, custadmin, hdladmin )
+# Check if reserved data lake Relational Engine users are in use (saptu, sapsupport, custadmin, hdladmin )
 def username_verify(conn):
     strt = datetime.datetime.now()
     log_file.info("\n%s"%(common.dividerline))
@@ -369,11 +352,12 @@ def username_verify(conn):
     cursor.execute("select count(*) from sys.sysuser where (user_name='saptu') OR (user_name='sapsupport') OR (user_name='custadmin') OR (user_name='hdladmin')")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('Reserved_User_Names', 'Error', 'To be Deleted'))
+        # Document needs to be updated for reserved users
+        features_list.append(('Reserved_User_Names', f'Reserved usernames(saptu, sapsupport, custadmin, hdladmin) to be deleted/renamed \n\t\t\t\t\t as not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.execute("select count(*) from sys.sysuser where (user_name='DBA')")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('DBA_user', 'Warning', 'To be replaced by \"hdladmin\"'))
+        features_list.append(('DBA_user', f'To be replaced by \"hdladmin\".'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -389,7 +373,7 @@ def certificates_verify(conn):
     cursor.execute("select count(*) from SYS.SYSCERTIFICATE")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('Certificates', 'Error', 'To be deleted'))
+        features_list.append(('Certificates', f'Security Certificates to be deleted as not supported in SAP HANA Cloud, Data Lake Relational Engine..'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -406,7 +390,7 @@ def externalenv_verify(conn):
     cursor.execute("select count(*) from SYS.SYSEXTERNENV")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('External_Environment', 'Error', 'To be deleted'))
+        action_required_list.append(('External_Environment', f'External Environment not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -422,7 +406,7 @@ def externalenvobj_verify(conn):
     cursor.execute("select count(*) from SYS.SYSEXTERNENVOBJECT")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('External_Environment_Objects', 'Error', 'To be deleted'))
+        action_required_list.append(('External_Environment_Objects', f'External Environment Objects not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -438,7 +422,7 @@ def spatialunit_verify(conn):
     cursor.execute("select count(*) from SYS.SYSSPATIALREFERENCESYSTEM")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('Spatial_Unit_Of_Measure', 'Error', 'To be deleted'))
+        action_required_list.append(('Spatial_Unit_Of_Measure', f'Geospatial features not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -454,7 +438,7 @@ def sa_tables_verify(conn):
     cursor.execute("select count(*) from SYS.SYSTABLE JOIN SYS.SYSUSER ON user_id = creator WHERE user_name not in ('SYS','rs_systabgroup','SA_DEBUG','dbo') AND table_type = 'BASE' and server_type='SA';")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('SA_Tables', 'Error', 'To be deleted'))
+        action_required_list.append(('SQLA_Tables', f'SQLA Catalog Tables not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -470,7 +454,7 @@ def ldindex_verify(conn):
     cursor.execute("select count(*) from SYS.SYSINDEX where index_type='LD'")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('LD_INDEXES', 'Error', 'To be deleted'))
+        features_list.append(('LD_INDEXES', f'LD_Indexes not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -486,7 +470,7 @@ def lfindex_verify(conn):
     cursor.execute("select count(*) from SYS.SYSINDEX where index_type='LF'")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('LF_INDEXES', 'Error', 'To be deleted'))
+        features_list.append(('LF_INDEXES', f'LF indexes are considered obsolete and the use of \n\t\t\t\t\t default FP indexes is now recommended in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -503,7 +487,7 @@ def hngindex_verify(conn):
     cursor.execute("select count(*) from SYS.SYSINDEX where index_type='HNG'")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('HNG_INDEXES', 'Error', 'To be deleted'))
+        features_list.append(('HNG_INDEXES', f'HNG indexes are considered obsolete and the use of \n\t\t\t\t\t default FP indexes is now recommended in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -519,7 +503,7 @@ def localitem_verify(conn):
     cursor.execute("select count(*) from SYS.SYSIQFILE WHERE segment_type = 'Local'")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('LOCAL_DBFILES', 'Error', 'To be deleted'))
+        features_list.append(('LOCAL_DBFILES', f'To be merged into one dbspace.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -535,7 +519,7 @@ def logicalserver_verify(conn):
     cursor.execute("select count(*) from SYSIQLOGICALSERVER where ls_id > 10000")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('Logical_Servers', 'Error', 'To be deleted'))
+        action_required_list.append(('Logical_Servers', f'Logical Servers not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -551,7 +535,7 @@ def dqpenable_verify(conn):
     cursor.execute("select count(*) from SYSOPTION where \"option\" like 'DQP_Enabled%' AND setting = 'ON'")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('DQP_Enabled', 'Error', 'To be disabled'))
+        features_list.append(('DQP_Enabled', f'Not Supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -560,21 +544,22 @@ def dqpenable_verify(conn):
 # Check if IQ_SHARED_TEMP present or not
 def sharedtemp_verify(conn):
     strt = datetime.datetime.now()
-    log_file.info("\n--------------------------------------------------------------------")
+    log_file.info("\n%s"%(common.dividerline))
     log_file.info("\nVerification of IQ_SHARED_TEMP started.")
 
     cursor = conn.cursor()
     cursor.execute("select count(*) from sp_iqdbspace() where DBSpaceName = 'IQ_SHARED_TEMP'")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('IQ_SHARED_TEMP', 'Error', 'Not Supported in Datalake IQ'))
+        # Document needs to be updated for IQ_SHARED_TEMP not supported on HDLRE
+        features_list.append(('IQ_SHARED_TEMP', f'Not Supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     fins = datetime.datetime.now()
     elap_sec = (fins - strt).total_seconds()
     log_file.info("\nVerification of IQ_SHARED_TEMP completed in %s seconds"%(elap_sec))
 
-# Check if any CORE_Options set and to be disabled in HDL
+# Check if any CORE_Options set and to be disabled in data lake Relational Engine
 def coreoptions_verify(conn):
     strt = datetime.datetime.now()
     log_file.info("\n%s"%(common.dividerline))
@@ -584,13 +569,14 @@ def coreoptions_verify(conn):
     cursor.execute("select \"option\" from SYSOPTION where \"option\" like 'CORE_Options%' AND setting = 'ON' ")
     rows = cursor.fetchall()
     for i in rows:
-        options_list.append((i[0],'Error', 'To be disabled'))
+        # Document needs to be updated for CORE_OPTIONS not supported on HDLRE
+        action_required_list.append((i[0], f'Not Supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
     log_file.info("\nVerification of CORE_Options completed in %s seconds"%(elap_sec))
 
-# Check if any MPX_options/MPX_test_options set and to be disabled in HDL
+# Check if any MPX_options/MPX_test_options set and to be disabled in data lake Relational Engine
 def mpxoptions_verify(conn):
     strt = datetime.datetime.now()
     log_file.info("\n%s"%(common.dividerline))
@@ -600,12 +586,12 @@ def mpxoptions_verify(conn):
     cursor.execute("""select \"option_name\" from sp_iqcheckoptions() where Option_name like 'MPX_options%' and User_name = 'PUBLIC'""")
     rows = cursor.fetchall()
     for i in rows:
-        options_list.append((i[0],'Error', 'No', 'To be disabled'))
+        features_list.append(('MPX_options', f'MPX Options not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
 
     cursor.execute("""select \"option_name\" from sp_iqcheckoptions() where Option_name like 'MPX_test_options%' and User_name = 'PUBLIC'""")
     rows = cursor.fetchall()
     for i in rows:
-        options_list.append((i[0],'Error', 'To be disabled'))
+        features_list.append(('MPX_test_options', f'MPX Test Options not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -621,7 +607,7 @@ def tempextractdir_verify(conn):
     cursor.execute("select count(*) from SYSOPTION where \"option\" like 'Temp_Extract_Directory%' AND setting != ''")
     count = cursor.fetchone()[0]
     if count != 0:
-        options_list.append(('Temp_Extract_Directory','Warning', 'It would be reset in HDL as it should be object store path in HDL'))
+        features_list.append(('Temp_Extract_Directory', f'It would be reset as it should be object store path in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -637,13 +623,13 @@ def webservice_verify(conn):
     cursor.execute("select count(*) from SYS.SYSWEBSERVICE")
     count = cursor.fetchone()[0]
     if count != 0:
-        features_list.append(('Web_Services', 'Error', 'To be deleted'))
+        features_list.append(('Web_Services', f'Web Services not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
     log_file.info("\nVerification of webservice completed in %s seconds"%(elap_sec))
 
-# Gather all HDL unsupported SQL Anywhere server options
+# Gather all data lake Relational Engine unsupported SQL Anywhere server options
 def sa_server_options(conn):
     strt = datetime.datetime.now()
     log_file.info("\n%s"%(common.dividerline))
@@ -684,12 +670,12 @@ def sa_server_options(conn):
         t = set(t) & set(l)
 
     for i in t:
-        options_list.append((i,'Error', 'To be disabled'))
+        features_list.append((i, f'HDL unsupport SQL Anywhere server options.'))
 
     elap_sec = common.elap_time(strt)
     log_file.info("\nVerification of SQL Anywhere server options completed in %s seconds"%(elap_sec))
 
-# Gather all HDL unsupported IQ server options
+# Gather all data lake Relational Engine unsupported IQ server options
 def iq_server_options(conn):
     strt = datetime.datetime.now()
     log_file.info("\n%s"%(common.dividerline))
@@ -731,7 +717,7 @@ def iq_server_options(conn):
         t = set(t) & set(l)
 
     for i in t:
-        options_list.append((i,'Error', 'To be disabled'))
+        features_list.append((i, f'HDL unsupport IQ server options.'))
 
     elap_sec = common.elap_time(strt)
     log_file.info("\nVerification of IQ server options completed in %s seconds"%(elap_sec))
@@ -746,7 +732,8 @@ def verify_readers_present(conn):
     cursor.execute("select count(*) from sp_iqmpxinfo() where role='reader'")
     count = cursor.fetchone()[0]
     if count > 0:
-        features_list.append(('MPX_Readers_Present', 'Error', 'To be dropped'))
+        # Document need to be updated with MPX readers need to be replaced with MPX writers on HDLRE
+        features_list.append(('MPX_Readers_Present', f'All HDLRE worker nodes are provisioned as Writer nodes.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
@@ -762,11 +749,86 @@ def verify_startup_options(conn):
     cursor.execute("select db_property('MaxConnections')")
     MaxConnections = cursor.fetchone()[0]
 
-    features_list.append(('StartupOptions', 'Warning','All startup options will be changed on HDL based on t-shirt size'))
+    # Document needs to be updated to mention On-prem IQ startup options will be replaced based on t-shirt sizes on HDLRE
+    features_list.append(('StartupOptions', f'HDLRE startup options are set based on node t-shirt size.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
     log_file.info("\nVerification of IQ startup options completed in %s seconds"%(elap_sec))
+
+# Prints System Configuration Information 
+def system_configuration():
+    strt = datetime.datetime.now()
+    log_file.info("\n%s"%(common.dividerline))
+    log_file.info("\nSystem Configuration Information started.")
+
+    #print("System Configuration Information")
+    #print("%s"%(common.dividerline))
+    #out_file.info("%s"%(common.double_divider_line))
+    #out_file.info(" ******** System Information ********")
+    #out_file.info("%s"%(common.double_divider_line))
+    #uname = platform.uname()
+    #output_logging('System', '%s' % (uname.system))
+    #output_logging('Node Name', '%s' % (uname.node))
+    #output_logging('Release', '%s' % (uname.release))
+    #output_logging('Version', '%s' % (uname.version))
+    #output_logging('Machine', '%s' % (uname.machine))
+    #output_logging('Processor', '%s' % (uname.processor))
+
+    
+    # let's out_file.info CPU information
+    out_file.info("%s"%(common.double_divider_line))
+    out_file.info(" ******** CPU Information ********")
+    out_file.info("%s"%(common.double_divider_line))
+    # Number of cores
+    output_logging('Physical cores', '%s' % (psutil.cpu_count(logical=False)))
+    output_logging('Total cores', '%s' % (psutil.cpu_count(logical=True)))
+
+    # CPU frequencies
+    #cpufreq = psutil.cpu_freq()
+    #output_logging('Max Frequency', '%.2f Mhz' % (cpufreq.max))
+    #output_logging('Min Frequency', '%.2f Mhz' % (cpufreq.min))
+    #output_logging('Current Frequency', '%.2f Mhz' % (cpufreq.current))
+
+    # CPU usage
+    #output_logging('Total CPU Usage', '%.2f%%' % (psutil.cpu_percent()))
+
+    # Memory Information
+    out_file.info("%s"%(common.double_divider_line))
+    out_file.info(" ******** Memory Information ********")
+    out_file.info("%s"%(common.double_divider_line))
+    # get the memory details
+    svmem = psutil.virtual_memory()
+    output_logging('Total', '%s' % (get_size(svmem.total)))
+    output_logging('Available', '%s' % (get_size(svmem.available)))
+    output_logging('Used', '%s' % (get_size(svmem.used)))
+    output_logging('Percentage', '%.2f%%' % (svmem.percent))
+    out_file.info("%s\n"%(common.dividerline))
+
+    elap_sec = common.elap_time(strt)
+    log_file.info("\nSystem Configuration Information completed in %s seconds"%(elap_sec))
+
+# Prints Recommended HDLRE Configuration Settings
+def hdlre_settings():
+    strt = datetime.datetime.now()
+    log_file.info("\n%s"%(common.dividerline))
+    log_file.info("\nRecommending SAP HANA Cloud, Data Lake Relational Engine Configuration Settings started.")
+
+    print("Recommended SAP HANA Cloud, Data Lake Relational Engine Configuration Settings")
+    print("%s"%(common.dividerline))
+    out_file.info("%s"%(common.double_divider_line))
+    out_file.info(" ******** Recommended SAP HANA Cloud, Data Lake Relational Engine Configuration Settings ********")
+    out_file.info("%s"%(common.double_divider_line))
+    out_file.info("Configure to be most compatible with SAP IQ")
+    out_file.info("%s"%(common.double_divider_line))
+    output_logging('Properties','Value')
+    out_file.info("%s"%(common.double_divider_line))
+    output_logging('Collation','UTF8BIN')
+    output_logging('CaseSensitivity','RESPECT')
+    out_file.info("%s\n"%(common.dividerline))
+
+    elap_sec = common.elap_time(strt)
+    log_file.info("\nRecommending SAP HANA Cloud, Data Lake Relational Engine Configuration Settings completed in %s seconds"%(elap_sec))
 
 # Prints all Server and dbspace property information used in current system in log file
 def server_properties(conn):
@@ -778,7 +840,7 @@ def server_properties(conn):
     print("Verifying server properties and dbspace properties")
     print("%s"%(common.dividerline))
     out_file.info("%s"%(common.double_divider_line))
-    out_file.info(" ******** Server properties and dbspace properties ********")
+    out_file.info(" ******** Server Properties and dbspace Properties ********")
     out_file.info("%s"%(common.double_divider_line))
     output_logging('Properties','Value')
     out_file.info("%s"%(common.double_divider_line))
@@ -795,7 +857,6 @@ def feature_properties(conn):
     dbspace_verify(conn)
     rlv_verify(conn)
     verify_iq_version(conn)
-    verify_HSR(conn)
     verify_encryptiondb(conn)
     verify_sap_supported_remote_services(conn)
     external_udf_verify(conn)
@@ -805,7 +866,6 @@ def feature_properties(conn):
     externalenvobj_verify(conn)
     spatialunit_verify(conn)
     sa_tables_verify(conn)
-    ldindex_verify(conn)
     lfindex_verify(conn)
     hngindex_verify(conn)
     localitem_verify(conn)
@@ -820,40 +880,40 @@ def feature_properties(conn):
     log_file.info("\n%s"%(common.dividerline))
     log_file.info("\nVerification incompatible features and properties started.")
 
-    out_file.info("\n%s"%(common.dividerline))
-    out_file.info("******** Number of HDL Incompatible Feature/Properties found in IQ Database: %d ********", len(features_list))
-    out_file.info("%s"%(common.dividerline))
     out_file.info("\n%s"%(common.double_divider_line))
-    out_file.info(" ******** Incompatible features and properties ********")
+    url = "https://help.sap.com/docs/SAP_HANA_DATA_LAKE/f70c0f7e072d4f969d3c8b4bc95b4214/18253c30c28a4407a61592b9067b56b8.html"
+
+    out_file.info(f"For detailed information on the features that are changed or no longer supported,")
+    out_file.info(f"See this topic: ({url})")
+    out_file.info("%s"%(common.dividerline))
+
+    out_file.info("\n%s"%(common.double_divider_line))
+    out_file.info(" ******** Informational Messages ********")
     out_file.info("%s"%(common.double_divider_line))
-    fixed_str = "{:<40} {:<15} {:<5}".format( 'Feature_Name', 'Severity', 'Action')
+
+    fixed_str = "{:<40} {:<15}".format( 'Feature', 'Comment')
     out_file.info(fixed_str)
     out_file.info("%s"%(common.double_divider_line))
     for row in features_list:
-        fixed_str = "{:<40} {:<15} {:<5}".format(str(row[0]), str(row[1]), str(row[2]))
+        fixed_str = "{:<40} {:<15}".format(str(row[0]), str(row[1]))
         out_file.info(fixed_str)
         out_file.info("%s"%(common.dividerline))
 
     sa_server_options(conn)
     iq_server_options(conn)
-    coreoptions_verify(conn)
     mpxoptions_verify(conn)
     tempextractdir_verify(conn)
 
-    out_file.info("\n\n%s"%(common.dividerline))
-    out_file.info("******** Number of HDL Unsupported Server Options found in IQ Database: %s ********", len(options_list))
-    out_file.info("%s"%(common.dividerline))
-
     out_file.info("\n%s"%(common.double_divider_line))
-    out_file.info(" ******** Unsupported Server Options ********")
+    out_file.info(" ******** Customer Action Required ********")
     out_file.info("%s"%(common.double_divider_line))
 
-    fixed_str = "{:<40} {:<20} {:<5}".format( 'Option_Name', 'Severity', 'Action')
+    fixed_str = "{:<40} {:<15}".format( 'Feature', 'Comment')
     out_file.info(fixed_str)
     out_file.info("%s"%(common.double_divider_line))
 
-    for row in options_list:
-        fixed_str = "{:<40} {:<20} {:<5}".format(str(row[0]), str(row[1]), str(row[2]))
+    for row in action_required_list:
+        fixed_str = "{:<40} {:<20}".format(str(row[0]), str(row[1]))
         out_file.info(fixed_str)
         out_file.info("%s"%(common.dividerline))
 
@@ -897,6 +957,8 @@ get_inputs(config_file)
 
 start_time = datetime.datetime.now()
 
+system_configuration()
+
 # calcaulate table sizes for all IQ tables before creating any tables for
 # pre_migration table.
 global systemDbUsage
@@ -907,7 +969,7 @@ global tempDbUsage
 tempDbUsage = dbtables_size_calc(conn, 'temp')
 global sharedTempDbUsage
 sharedTempDbUsage = dbtables_size_calc(conn, 'sharedtemp')
-options_list = list()
+action_required_list = list()
 features_list = list()
 
 server_properties(conn)

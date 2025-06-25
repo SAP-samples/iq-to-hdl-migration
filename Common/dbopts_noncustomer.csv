@@ -23,7 +23,9 @@ cis_rowset_size
 max_statement_count
 max_cursor_count
 min_password_length
+auditing
 conn_auditing
+auditing_options
 global_database_id
 max_hash_size
 prevent_article_pkey_update
@@ -46,6 +48,8 @@ secure_feature_key
 post_login_procedure
 max_client_statements_cached
 query_mem_timeout
+allow_read_client_file
+allow_write_client_file
 priority
 max_priority
 st_geometry_describe_type
@@ -57,9 +61,11 @@ st_geometry_interpolation
 external_udf_execution_mode
 base_tables_in_rlv_store
 dynamic_tiering_result_type
+min_role_admins
 trusted_certificates_file
 db_publisher
 disk_sandbox
+audit_log
 max_connections
 time_zone
 connection_type
@@ -100,4 +106,4 @@ sr_timestamp_format
 sr_timestamp_with_time_zone_format
 assume_distinct_servers
 ml_remote_id
-hdl_trace_event_loop
+default_dbspace
