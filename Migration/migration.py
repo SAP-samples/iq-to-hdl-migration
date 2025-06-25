@@ -30,35 +30,81 @@ from logging.handlers import QueueHandler, QueueListener
 import fnmatch
 import heapq
 import math
-
 argv = sys.argv[1:]
-# total arguments passed
 n = len(sys.argv)
-if not(n==3 or n==2 or n==5):
-    sys.exit("Error: Incorrect/Invalid number of arguments. Run migration.py -h or --help for help")
+
+# Defaults
+config_file = ''
+dbmode = 'r'
+onlyschema = 'n'
+onlydata = 'n'
+fullextraction = 'n'
+
+# Handle help first
+if '-h' in argv or '--help' in argv:
+    print('''
+Usage:
+    migration.py --config_file <config file path> [--mode w] [--onlyschema y] [--onlydata y] [--fullextraction y]
+Same as:
+    migration.py -f <config file path> [-m w] [-s y] [-d y] [-e y]
+
+Switch Details:
+    --config_file or -f     : Mandatory. Denotes utilizing the config file to access parameters from.
+    --mode or -m            : Optional. To run the migration utility when database is in read-write mode. Use 'w' for read-write.
+    --onlyschema or -s      : Optional. To run the migration utility only for schema unload. Use 'y' to unload only schema.
+    --onlydata or -d        : Optional. To run the migration utility only for data unload. Use 'y' to unload only data.
+    --fullextraction or -e  : Optional. To run the migration utility for both schema and data unload. Use 'y' to unload both schema and data.
+
+Note:
+    Only one of --onlyschema, --onlydata, or --fullextraction can be 'y'. They are mutually exclusive.
+    One of the three options must be provided and set to 'y'.
+    SAP recommends to run coordinator node with -iqro flag while migration process.
+        ''')
+    sys.exit()
+
+# Validate for incorrect short forms like -mode, -onlyschema etc.
+for arg in argv:
+    if arg.startswith('-') and not arg.startswith('--'):
+        if arg not in ['-h', '-f', '-m', '-s', '-d', '-e']:
+            print(f"Error: Unsupported or incorrectly formatted option '{arg}'. Use proper short or long options.")
+            sys.exit(2)
 
 try:
-   opts, args = getopt.getopt(argv,"hf:m:",["help","config_file=","mode="])
+    opts, args = getopt.getopt(argv, "hf:m:s:d:e:", ["help", "config_file=", "mode=", "onlyschema=", "onlydata=", "fullextraction="])
 except getopt.GetoptError:
-   print ("Error : Unsupported option/values. Run migration.py -h or --help for help")
-   sys.exit(2)
+    print("Error : Unsupported option/values. Run migration.py -h or --help for help")
+    sys.exit(2)
+
 for opt, arg in opts:
-      if opt in ("-h", "--help"):
-         print ('usage:\nmigration.py --config_file <config file path> [--mode w]')
-         print ('which is the same as:\nmigration.py -f <config file path> [-m, w]')
-         print ('Switch --config_file or -f denote utilizing the config file to access parameters from.')
-         print ('Optional switch \'--mode w\' or \'-m w\' is to run the migration utility when database is in read-write mode.')
-         print ('SAP recommends to run coordinator node with -iqro flag while migration process.')
-         sys.exit()
-      if n==5:
-         if opt in ("-f", "--config_file"):
-           config_file = arg
-         elif opt in ("-m", "--mode"):
-           dbmode = arg
-      elif n==3:
-         dbmode = 'r'
-         if opt in ("-f", "--config_file"):
-           config_file = arg
+    if opt in ("-f", "--config_file"):
+        config_file = arg
+    elif opt in ("-m", "--mode"):
+        if arg != 'w':
+            sys.exit("Error: --mode or -m only supports 'w' as a valid value.")
+        dbmode = arg
+    elif opt in ("-s", "--onlyschema"):
+        if arg.lower() != 'y':
+            sys.exit("Error: --onlyschema or -s only supports 'y'. Use this option only if you want to unload only schema.")
+        onlyschema = arg.lower()
+    elif opt in ("-d", "--onlydata"):
+        if arg.lower() != 'y':
+            sys.exit("Error: --onlydata or -d only supports 'y'. Use this option only if you want to unload only data.")
+        onlydata = arg.lower()
+    elif opt in ("-e", "--fullextraction"):
+        if arg.lower() != 'y':
+            sys.exit("Error: --fullextraction or -e only supports 'y'. Use this option only if you want unload both schema and data.")
+        fullextraction = arg.lower()    
+
+# Check if config_file is provided
+if config_file.strip() == '':
+    sys.exit("Error: --config_file or -f is a mandatory option. Please specify a valid config file path.")
+
+# Validation for mutual exclusivity
+flags = [onlyschema == 'y', onlydata == 'y', fullextraction == 'y']
+if flags.count(True) > 1:
+    sys.exit("Error: --onlyschema, --onlydata, and --fullextraction are mutually exclusive. Only one can be 'y'. Run migration.py -h or --help for help.")
+elif flags.count(True) == 0:
+    sys.exit("Error: One of --onlyschema, --onlydata, or --fullextraction must be 'y'. Run migration.py -h or --help for help.")
 
 # detect the current working directory and print it
 path = os.getcwd()
@@ -97,9 +143,7 @@ migration_log = "%s%smigration.log"%(path,path_sep)
 global no_extraction_file
 no_extraction_file="%s%sno_extraction.list"%(migrationpath,path_sep)
 
-global parallel_extract
 global compressed_data
-parallel_extract=1
 compressed_data=1
 
 global byteorder
@@ -140,9 +184,6 @@ def get_inputs(config_file):
     global AutoUpdatedReload_path
     AutoUpdatedReload_path = "%s%sAutoUpdated_Reload.sql"%(migrationpath,path_sep)
 
-    global ForeignKey_path
-    ForeignKey_path = "%s%sForeign_Key_Constraint.sql"%(migrationpath,path_sep)
-
     global resume
     resume = False
     create_shareddir()
@@ -157,6 +198,8 @@ def get_inputs(config_file):
             val = str(input(str1))
 
         if val.lower() == "r":
+            if onlydata == 'y':
+                sys.exit("Restart is not allowed in data-only mode. Use Resume or Cancel.")
             try:
                 shutil.rmtree(migrationpath)
                 if not is_windows:
@@ -191,7 +234,12 @@ def get_inputs(config_file):
         else:
             listener_q,log_q,logger = logger_init('w')
         logging.info("%s*************************************************************"%newline)
-        logging.info("[%s] : Schema and Data Unload Started."%(datetime.datetime.now()))
+        if onlyschema == 'y':
+            logging.info("[%s] : Schema Unload Started."%(datetime.datetime.now()))
+        elif onlydata == 'y':
+            logging.info("[%s] : Data Unload Started."%(datetime.datetime.now()))
+        elif fullextraction == 'y':
+            logging.info("[%s] : Schema and Data Unload Started."%(datetime.datetime.now()))
         logging.info("*************************************************************")
         create_migrationdir()
 
@@ -210,13 +258,8 @@ def get_inputs(config_file):
     logging.info("%s"%(common.dividerline))
     logging.info("Python version: %s"%sys.version)
 
-    # Validation of right hyperscaler names supported
-    if common.object_store.lower() == 'azure' or common.object_store.lower() == 'aws':
-        logging.info("%s"%(common.dividerline))
-        logging.info("Selected Object_store = %s"%common.object_store)
-
     if common.w == common.t:
-        logging.info("Verifying Hyperscaler_Details")
+        logging.info("Verifying HDLFS_Configuration")
         logging.info("%s"%(common.dividerline))
 
     logging.info("Client Hostname: %s , ip-address : %s , full-hostname : %s"%(common.host,common.ipaddress,common.fullhostname))
@@ -317,13 +360,12 @@ def version_verify(connectstr):
 
     logging.info("%s"%(common.dividerline))
     logging.info("IQ Database version:%s%s"%(newline,version))
-    global parallel_extract
     global compressed_data
     if 'SAP IQ/16.0.' in version:
-        parallel_extract = 0
-        logging.info("Extraction of data will be in binary or ascii format without parallelization.")
+        logging.info("%s"%(common.dividerline))
+        logging.info("16.0. version is not supported with data lake Files due to time constraint, as data extraction will be in binary or ascii format without parallelization.")
+        sys.exit("16.0. version is not supported with data lake Files due to time constraint, as data extraction will be in binary or ascii format without parallelization.")
     else:
-        parallel_extract = 1
         if 'SAP IQ/16.1.01' in version:
             compressed_data = 0
             logging.info("Extraction of data will be in text/binary format with parallelization.")
@@ -475,51 +517,83 @@ def make_iqunloadscript(path ):
 
 # Function to do iqunload using ssh on different host
 def iqunload_differenthost():
+    import paramiko # type: ignore
+
     str1 = "Starting schema unload"
     common.print_and_log(str1)
     print("%s"%(common.dividerline))
     make_iqunloadscript(common.sybase_path)
 
-    # Connect to remote host
-    import paramiko
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect( common.hostname, username=common.client_id, password=common.client_pwd)
+    client = None
+    sftp = None
 
-    # Setup sftp connection and transmit this utility
-    localfile = path + '%sSchemaUnload.sh'%path_sep
-    sftp = client.open_sftp()
-    sftp.put(localfile, '%s%sSchemaUnload.sh'%(common.sybase_path,path_sep))
-    sftp.close()
+    try:
+        # Connect to remote host
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect( common.hostname, username=common.client_id, password=common.client_pwd)
 
-    stdin, stdout, stderr = client.exec_command('cd %s;rm -f reload.sql;chmod 755 SchemaUnload.sh;sh SchemaUnload.sh >& SchemaUnload.out'%(common.sybase_path),get_pty=True)
-    stderr_content = stderr.read()
-    stdin, stdout, stderr = client.exec_command('cd %s; ls reload.sql'%(common.sybase_path),get_pty=True)
-    success_iqunload = stdout.readlines()
+        # Setup sftp connection and transmit this utility
+        localfile = path + '%sSchemaUnload.sh'%path_sep
+        remote_file = '%s%sSchemaUnload.sh' % (common.sybase_path, path_sep)
+        sftp = client.open_sftp()
+        sftp.put(localfile, remote_file)
+        logging.info(f"Uploaded {localfile} to {remote_file}")
+        sftp.close()
+        sftp = None
 
-    if success_iqunload == [u'reload.sql\r\n']:
-        str1 = "Schema unload completed successfully and output logged in :%s%s/reload.sql"%(newline,common.sybase_path)
+        # Execute the unload script
+        commands = [
+            f'cd {common.sybase_path}; rm -f reload.sql; chmod 755 SchemaUnload.sh; sh SchemaUnload.sh >& SchemaUnload.out',
+            f'cd {common.sybase_path}; ls reload.sql'
+        ]
+
+        for command in commands:
+            stdin, stdout, stderr = client.exec_command(command, get_pty=True)
+            exit_status = stdout.channel.recv_exit_status()
+            stderr_content = stderr.read().decode().strip()
+            if exit_status != 0:
+                raise Exception(f"Command failed: {command}\nError: {stderr_content}")
+            logging.info(f"Command succeeded: {command}")
+
+        # Check if reload.sql was successfully created
+        success_iqunload = stdout.readlines()
+        if any('reload.sql' in line for line in success_iqunload):
+            str1 = f"Schema unload completed successfully and output logged in: {newline}{common.sybase_path}/reload.sql"
+            common.print_and_log(str1)
+        else:
+            raise Exception(f"Schema unload failed on {common.hostname}. Please check: {common.sybase_path}/SchemaUnload.out for failure(s).")
+
+        # Download the reload.sql file
+        newfilepath = path + '%sreload.sql' % path_sep
+        oldfilepath = common.sybase_path + '%sreload.sql' % path_sep
+        sftp = client.open_sftp()
+        sftp.get(oldfilepath, newfilepath)
+        sftp.close()
+        sftp = None
+
+        # Verify the downloaded file
+        reloadsql_path = '%s%sreload.sql' % (path, path_sep)
+        if os.path.isfile(reloadsql_path) and os.access(reloadsql_path, os.R_OK):
+            logging.info(f"Schema unload completed successfully and moved reload.sql file to: {newline}{reloadsql_path}")
+        else:
+            raise Exception(f"Schema unload failed. Either the {reloadsql_path} file is missing or not readable.")
+
+        # Move the file to the migration data path
+        data_path = "%s%sMigration_Data" % (common.shared_path, path_sep)
+        shutil.move(reloadsql_path, data_path)
+        str1 = f"{reloadsql_path} {newline}is moved to {newline}{reload_path}"
         common.print_and_log(str1)
-    else:
-        sys.exit("Schema unload failed on %s. Please check :%s%s%sSchemaUnload.out for failure(s)."%(common.hostname,newline,common.sybase_path,path_sep))
+    except Exception as e:
+        logging.error(f"Error during schema unload: {str(e)}")
+        raise
 
-    newfilepath = path + '%sreload.sql'%path_sep
-    oldfilepath = common.sybase_path + '%sreload.sql'%path_sep
-    sftp = client.open_sftp()
-    sftp.get(oldfilepath, newfilepath)
-    sftp.close()
-
-    client.close()
-    reloadsql_path = '%s%sreload.sql'%(path,path_sep)
-    if os.path.isfile(reloadsql_path) and os.access(reloadsql_path, os.R_OK):
-        logging.info("Schema unload completed successfully and moved reload.sql file to: %s%s"%(newline,reloadsql_path))
-    else:
-        sys.exit("Schema unload failed, Either the %s file is missing or not readable"%reloadsql_path)
-    data_path = "%s%sMigration_Data"%(common.shared_path,path_sep)
-    shutil.move(reloadsql_path,data_path)
-    str1 = "%s %sis moved to %s%s"%(reloadsql_path,newline,newline,reload_path)
-    common.print_and_log(str1)
-
+    finally:
+        # Ensure resources are cleaned up
+        if sftp:
+            sftp.close()
+        if client:
+            client.close()
 
 # Function which call iqunload on the basis of verification of host
 def iqunload_call():
@@ -574,7 +648,7 @@ def dbo_user_dependent_objects(conn, dbo_artifact_list):
 
     table_id_list = []
     # Get the tableid and tablename of dbo user tables
-    cursor.execute("select table_id, table_name from SYS.SYSTABLE JOIN SYS.SYSUSER ON user_id = creator WHERE user_name in ('dbo')  AND table_type = 'BASE' and server_type='IQ';")
+    cursor.execute("select table_id, table_name from SYS.SYSTABLE JOIN SYS.SYSUSER ON user_id = creator WHERE lower(user_name) in ('dbo')  AND table_type = 'BASE' and server_type='IQ';")
     records = cursor.fetchall()
     for i in records:
         dbo_artifact_list.append((i[1],"COMMENT","CREATE TABLE","dbo"))
@@ -625,7 +699,7 @@ def dbo_user_dependent_objects(conn, dbo_artifact_list):
 
     # procedure and functions whose creator is dbo user
     cursor.execute("""select proc_name from SYS.SYSPROCEDURE p join sysuser s ON (p.creator = s.user_id) where
-                        s.user_name='dbo' and proc_name not like 'sp_%' and proc_name not like 'sa_%'""")
+                        lower(s.user_name)='dbo' and proc_name not like 'sp_%' and proc_name not like 'sa_%'""")
     records = cursor.fetchall()
     for i in records:
         dbo_artifact_list.append((i[0],"COMMENT","CREATE procedure","NULL"))
@@ -634,7 +708,7 @@ def dbo_user_dependent_objects(conn, dbo_artifact_list):
         dbo_artifact_list.append((i[0],"COMMENT","CREATE FUNCTION","NULL"))
 
     # Add dbo user triggers in DB_Artifacts.list
-    cursor.execute("""select  s.name from sysobjects s JOIN SYS.SYSUSER u ON s.uid = u.user_id WHERE u.user_name ='dbo' and s.type = 'TR'""")
+    cursor.execute("""select  s.name from sysobjects s JOIN SYS.SYSUSER u ON s.uid = u.user_id WHERE lower(u.user_name) ='dbo' and s.type = 'TR'""")
     records = cursor.fetchall()
     for i in records:
         dbo_artifact_list.append((i[0],"COMMENT","CREATE TRIGGER","NULL"))
@@ -643,7 +717,6 @@ def dbo_user_dependent_objects(conn, dbo_artifact_list):
 
     # In reload.sql we have call dbo.sa_recompile_views and more. To comment all this
     # a list made from iqunload code to add all this calls in artifacts list
-    dbo_artifact_list.append(("call","COMMENT","sa_recompile_views","dbo"))
     dbo_artifact_list.append(("call","COMMENT","sa_reset_identity","dbo"))
     dbo_artifact_list.append(("call","COMMENT","sa_make_object","dbo"))
     dbo_artifact_list.append(("call","COMMENT","sa_sync","dbo"))
@@ -654,6 +727,91 @@ def dbo_user_dependent_objects(conn, dbo_artifact_list):
     dbo_artifact_list.append(("call","COMMENT","sa_refresh_materialized_views","dbo"))
 
     cursor.close()
+
+def sap_user_dependent_objects(conn, sap_artifact_list):
+
+    cursor = conn.cursor()
+
+    # Add _sap_* users as CREATE USER entries
+    cursor.execute(r"SELECT user_name FROM SYS.SYSUSER WHERE lower(user_name) LIKE '_sap\_%' ESCAPE '\'")
+    rows = cursor.fetchall()
+    for i in rows:
+        if i[0]:
+            sap_artifact_list.append((i[0], "COMMENT", "GRANT CONNECT", "NULL"))
+
+    table_id_list = []
+    cursor.execute(r"""SELECT t.table_id, t.table_name, u.user_name 
+                       FROM SYS.SYSTABLE t 
+                       JOIN SYS.SYSUSER u ON t.creator = u.user_id 
+                       WHERE lower(u.user_name) LIKE '_sap\_%' ESCAPE '\' 
+                       AND t.table_type = 'BASE' AND t.server_type = 'IQ'""")
+    records = cursor.fetchall()
+    for table_id, table_name, user_name in records:
+        sap_artifact_list.append((table_name, "COMMENT", "CREATE TABLE", user_name))
+        sap_artifact_list.append((table_name, "COMMENT", "CREATE procedure", user_name))
+        table_id_list.append(table_id)
+
+    view_id_list = []
+    view_name_list = []
+
+    for table_id in table_id_list:
+        cursor.execute(f"SELECT index_name FROM SYS.SYSINDEX i JOIN SYS.SYSTABLE t ON t.table_id = i.table_id WHERE t.table_id = {table_id}")
+        for i in cursor.fetchall():
+            sap_artifact_list.append((i[0], "COMMENT", "CREATE", "INDEX"))
+
+        cursor.execute(f"SELECT trigger_name FROM SYS.SYSTRIGGER WHERE table_id = {table_id}")
+        for i in cursor.fetchall():
+            sap_artifact_list.append((i[0], "COMMENT", "CREATE TRIGGER", "NULL"))
+            sap_artifact_list.append((i[0], "COMMENT", "COMMENT ON", "TRIGGER"))
+            sap_artifact_list.append((i[0], "COMMENT", "COMMENT TO PRESERVE FORMAT ON", "TRIGGER"))
+
+        cursor.execute(f"""SELECT v.table_name, d.dep_object_id 
+                           FROM SYSDEPENDENCY d 
+                           JOIN systab t ON t.object_id = d.ref_object_id 
+                           JOIN systab v ON v.object_id = d.dep_object_id 
+                           WHERE t.table_id = {table_id}""")
+        for view_name, view_id in cursor.fetchall():
+            view_id_list.append(view_id)
+            view_name_list.append(view_name)
+
+    while view_id_list:
+        ref_object = view_id_list.pop()
+        cursor.execute(f"""SELECT v.table_name, d.dep_object_id 
+                           FROM SYSDEPENDENCY d 
+                           JOIN systab t ON t.object_id = d.ref_object_id 
+                           JOIN systab v ON v.object_id = d.dep_object_id 
+                           WHERE d.ref_object_id = {ref_object}""")
+        for view_name, dep_id in cursor.fetchall():
+            view_id_list.append(dep_id)
+            view_name_list.append(view_name)
+
+    for view in view_name_list:
+        sap_artifact_list.append((view, "COMMENT", "CREATE VIEW", "NULL"))
+        sap_artifact_list.append((view, "COMMENT", "COMMENT ON", "VIEW"))
+        sap_artifact_list.append((view, "COMMENT", "COMMENT TO PRESERVE FORMAT ON", "VIEW"))
+
+    cursor.execute(r"""SELECT p.proc_name 
+                       FROM SYS.SYSPROCEDURE p 
+                       JOIN SYS.SYSUSER u ON p.creator = u.user_id 
+                       WHERE lower(u.user_name) LIKE '_sap\_%' ESCAPE '\' 
+                       AND proc_name NOT LIKE 'sp_%' AND proc_name NOT LIKE 'sa_%'""")
+    for i in cursor.fetchall():
+        sap_artifact_list.append((i[0], "COMMENT", "CREATE procedure", "NULL"))
+        sap_artifact_list.append((i[0], "COMMENT", "COMMENT ON", "Procedure"))
+        sap_artifact_list.append((i[0], "COMMENT", "COMMENT TO PRESERVE FORMAT ON", "Procedure"))
+        sap_artifact_list.append((i[0], "COMMENT", "CREATE FUNCTION", "NULL"))
+
+    cursor.execute(r"""SELECT s.name 
+                       FROM sysobjects s 
+                       JOIN SYS.SYSUSER u ON s.uid = u.user_id 
+                       WHERE lower(u.user_name) LIKE '_sap\_%' ESCAPE '\' AND s.type = 'TR'""")
+    for i in cursor.fetchall():
+        sap_artifact_list.append((i[0], "COMMENT", "CREATE TRIGGER", "NULL"))
+        sap_artifact_list.append((i[0], "COMMENT", "COMMENT ON", "TRIGGER"))
+        sap_artifact_list.append((i[0], "COMMENT", "COMMENT TO PRESERVE FORMAT ON", "TRIGGER"))
+
+    cursor.close()
+
 
 # Function to add remote server dependent objects in DB_Artifacts.list
 def remote_dependent_objects(conn, l):
@@ -758,7 +916,7 @@ def modify_artifacts_file(filename, connectstr):
             artifact_list.append((line,"COMMENT","SET OPTION","NULL"))
             artifact_list.append((line,"COMMENT","SET TEMPORARY OPTION","NULL"))
 
-    # Add dbspaces to be replaced by user_object_store in list
+    # Add dbspaces to be replaced by user_main in list
     try:
         conn = pyodbc.connect(connectstr, timeout=0)
     except Exception as exp:
@@ -821,9 +979,9 @@ def modify_artifacts_file(filename, connectstr):
     # Add revoke with create dbspace name which get from SYSDBSPACEPERM query in DB_Artifacts.list
     artifact_list.append(("revoke","COMMENT","CREATE","dbspace_name"))
     artifact_list.append(("revoke","COMMENT","CREATE","user_object_store"))
-    artifact_list.append(("ALTER TABLE","COMMENT","FOREIGN KEY","REFERENCES"))
 
     dbo_user_dependent_objects(conn,artifact_list)
+    sap_user_dependent_objects(conn,artifact_list)
 
     cursor.close()
     conn.close()
@@ -1135,9 +1293,6 @@ def modify_reloadsql():
                 i += 1
 
     write_lines_intofile(AutoUpdatedReload_path,sql_lines)
-    if len(foreign_list) != 0:
-        foreign_list.append("-- Creation of Foreign_Key_Constraint.sql completed. ")
-        write_lines_intofile(ForeignKey_path,foreign_list)
 
     return
 
@@ -1277,31 +1432,6 @@ def schema_unload_and_modify(connectstr):
             str1 = "Modification of schema is complete and output is saved at: %s%s" % (newline,AutoUpdatedReload_path)
             common.print_and_log(str1)
 
-    # After successful verification of AutoUpdatedReload file, verify the foreign key file
-    foreign_tables_count = check_foreign_tables(connectstr)
-    if (foreign_tables_count > 0 ):
-        Foreignkey_complete = verify_foreignkey_constraint()
-        if Foreignkey_complete == 1 :
-            if resume == True:
-                logging.info("%s"%(common.dividerline))
-                logging.info("%s file already exists.%sSkipping unloading foreign key constraints as migration utility started in resume mode." %(ForeignKey_path,newline))
-            else:
-                logging.info("%s"%(common.dividerline))
-                logging.info("%s file successfully created."%(ForeignKey_path))
-    else:
-        Foreignkey_complete = 1
-        logging.info("%s"%(common.dividerline))
-        logging.info ("The database has no foreign key constriants")
-
-    if Foreignkey_complete == 0:
-        create_foreignkey_resume()
-        Foreignkey_complete = verify_foreignkey_constraint()
-        if Foreignkey_complete == 1 :
-            logging.info("%s"%(common.dividerline))
-            logging.info("%s file successfully created."%(ForeignKey_path))
-        else:
-            sys.exit("Creation of %s file failed. Re-run the migration utility in resume mode."%(ForeignKey_path))
-
     modify_total_elaptime = common.elap_time(modify_total_strt)
     days, hours, minutes, seconds = common.calculate_time(modify_total_elaptime)
     logging.info("%s"%(common.dividerline))
@@ -1323,13 +1453,6 @@ def getfilelist_fromesinfo(tableid,path_to_copy):
                     for words in word.split(','):
                         # For getting file list we need to search tableid and file extension in its name
                         # Only searching tableid will fail if record count has tableid in it
-                        if '%s'%str(tableid) in words and (('gz' in words ) or ('txt' in words) or ('inp' in words)):
-                            filelst.append(words)
-    else:
-        with codecs.open("%s%sesinfo"%(path_to_copy,path_sep), "r", common.charset) as f:
-            for lines in f:
-                for word in lines.split("'"):
-                    for words in word.split(','):
                         if '%s'%str(tableid) in words and (('gz' in words ) or ('txt' in words) or ('inp' in words)):
                             filelst.append(words)
     return filelst
@@ -1368,6 +1491,7 @@ def form_load_table_stmt(tablename, conn, path_to_copy, binary):
     with codecs.open("%s%s%s.sql"%(path_to_copy,path_sep,tableid), "w", common.charset) as f1:
         f1.write("COMMIT;" + newline)
         f1.write("set temporary option \"auto_commit\" = 'OFF';"+ newline)
+        f1.write("set temporary option disable_ri_check= 'on';"+ newline)
         f1.write("BEGIN TRANSACTION;" + newline)
         cursor3 = conn.cursor()
         cursor3.execute("select setting from SYSOPTIONS where \"option\"='string_rtruncation';")
@@ -1418,24 +1542,12 @@ def form_load_table_stmt(tablename, conn, path_to_copy, binary):
 
         l = getfilelist_fromesinfo(tableid,path_to_copy)
 
-        if common.object_store.lower() == 'azure':
-            obj_path = "bb://%s/Extracted_Data/%s/"%(common.az_container_name,tableid)
-            for lst in l:
-                filelst.append("'"+obj_path+str(lst)+"'")
+        obj_path = "hdlfs:///%s/Extracted_Data/%s/"%(common.hdlfs_directory,tableid)
+        for lst in l:
+            filelst.append("'"+obj_path+str(lst)+"'")
 
-            my_string = ','.join(map(str, filelst))
-            f1.write(my_string )
-            f1.write(newline + tab + "connection_string " + "'"+ common.connection_string+ "'")
-        else:
-            obj_path = "s3://%s/Extracted_Data/%s/"%(common.aws_bucket,tableid)
-            for lst in l:
-                filelst.append("'"+obj_path+str(lst)+"'")
-
-            my_string = ','.join(map(str, filelst))
-            f1.write(my_string )
-            f1.write(newline + tab + "ACCESS_KEY_ID " + "'"+ common.aws_access_key+ "'")
-            f1.write(newline + tab + "SECRET_ACCESS_KEY " + "'"+ common.aws_secret_key+ "'")
-            f1.write(newline + tab + "REGION " + "'"+ common.aws_region+ "'")
+        my_string = ','.join(map(str, filelst))
+        f1.write(my_string )
 
         if binary == 0:
             f1.write(newline + tab + "quotes off")
@@ -1462,6 +1574,7 @@ def form_load_table_sequential(tablename, conn, path_to_copy, binary):
     owner = splits[0]
     with codecs.open("%s%s%s.sql"%(path_to_copy,path_sep,tableid), "w", common.charset) as f1:
         f1.write("set temporary option \"auto_commit\" = 'OFF';"+ newline + newline)
+        f1.write("set temporary option disable_ri_check= 'on';"+ newline)
         f1.write("COMMIT;" + newline)
         f1.write("BEGIN TRANSACTION;" + newline)
         cursor3 = conn.cursor()
@@ -1515,30 +1628,12 @@ def form_load_table_sequential(tablename, conn, path_to_copy, binary):
                 l.append(var)
                 i = i + 1
 
-        if common.object_store.lower() == 'azure':
-            obj_path = "bb://%s/Extracted_Data/%s/"%(common.az_container_name,tableid)
-            if binary == 0:
-                my_string = "'" + obj_path + "%s.%s"%(tableid,fileext) + "'"
-            else:
-                for lst in l:
-                    filelst.append("'"+obj_path+lst+"'")
-                my_string = ','.join(map(str, filelst))
+        obj_path = "hdlfs:///%s/Extracted_Data/%s/"%(common.hdlfs_directory,tableid)
+        for lst in l:
+            filelst.append("'"+obj_path+str(lst)+"'")
 
-            f1.write(my_string )
-            f1.write(newline + tab + "connection_string " + "'"+ common.connection_string+ "'")
-        else:
-            obj_path = "s3://%s/Extracted_Data/%s/"%(common.aws_bucket,tableid)
-            if binary == 0:
-                my_string = "'" + obj_path + "%s.%s"%(tableid,fileext) + "'"
-            else:
-                for lst in l:
-                    filelst.append("'"+obj_path+lst+"'")
-                my_string = ','.join(map(str, filelst))
-
-            f1.write(my_string )
-            f1.write(newline + tab + "ACCESS_KEY_ID " + "'"+ common.aws_access_key+ "'")
-            f1.write(newline + tab + "SECRET_ACCESS_KEY " + "'"+ common.aws_secret_key+ "'")
-            f1.write(newline + tab + "REGION " + "'"+ common.aws_region+ "'")
+        my_string = ','.join(map(str, filelst))
+        f1.write(my_string )
 
         if binary == 0:
             f1.write(newline + tab + "defaults off")
@@ -1593,7 +1688,7 @@ def generate_iqtablesize_withrowscount(connectstr):
 
     with codecs.open(iqtables_list, "w", common.charset) as f:
         cursor = conn.cursor()
-        cursor.execute("SELECT table_name,user_name,t.table_id FROM SYS.SYSTABLE t JOIN SYS.SYSUSER u ON u.user_id = t.creator JOIN SYS.SYSIQTAB it ON (t.table_id = it.table_id) WHERE t.table_type not like '%GBL TEMP%' and t.server_type = 'IQ' AND it.is_rlv = 'F' and user_name != 'dbo'")
+        cursor.execute("SELECT table_name,user_name,t.table_id FROM SYS.SYSTABLE t JOIN SYS.SYSUSER u ON u.user_id = t.creator JOIN SYS.SYSIQTAB it ON (t.table_id = it.table_id) WHERE t.table_type not like '%GBL TEMP%' and t.server_type = 'IQ' AND it.is_rlv = 'F' and lower(user_name) != 'dbo' and lower(user_name) != 'hdladmin' AND lower(user_name) NOT LIKE '_sap\\_%' ESCAPE '\\'")
         records = cursor.fetchall()
         cursor.close()
         i=0
@@ -1699,7 +1794,7 @@ def verify_iq_table_file(connectstr):
         except Exception as exp:
             sys.exit("Exception: %s"%str(exp))
         cursor = conn.cursor()
-        cursor.execute("SELECT table_name,user_name,t.table_id FROM SYS.SYSTABLE t JOIN SYS.SYSUSER u ON u.user_id = t.creator JOIN SYS.SYSIQTAB it ON (t.table_id = it.table_id) WHERE t.table_type not like '%GBL TEMP%' and t.server_type = 'IQ' AND it.is_rlv = 'F' and user_name != 'dbo'")
+        cursor.execute("SELECT table_name,user_name,t.table_id FROM SYS.SYSTABLE t JOIN SYS.SYSUSER u ON u.user_id = t.creator JOIN SYS.SYSIQTAB it ON (t.table_id = it.table_id) WHERE t.table_type not like '%GBL TEMP%' and t.server_type = 'IQ' AND it.is_rlv = 'F' and lower(user_name) != 'dbo' and lower(user_name) != 'hdladmin' AND lower(user_name) NOT LIKE '_sap\\_%' ESCAPE '\\'")
         count_iq_tables = len(cursor.fetchall())
         cursor.close()
         conn.close()
@@ -1921,35 +2016,37 @@ def get_unload_table_list(batch):
         formlist_tobeunloaded(batch)
 
 # Function which adds the entry of table in ExtractedTables.out on successfull extraction
-def updateUnloadStatus(qSuccess,batch,total_table,tables_count,fail_count):
+def updateUnloadStatus(qSuccess,batch,total_table,tables_count,fail_count,file_write_lock):
     if batch != 0:
         global extractedTables_out
         extractedTables_out="%s%sExtractedTables_Batch_%s.out"%(migrationpath,path_sep,batch)
 
-    with codecs.open(extractedTables_out, "a", common.charset) as f:
-        while True:
-            try:
-                owner,tableinfo= qSuccess.get_nowait()
-                splits = tableinfo[0].split('.')
-                table = splits[1]
-                tableid = tableinfo[3]
-                if  tableinfo[4]:
-                    f.write(  tableinfo[0]  + "," + str(tableinfo[1]) + "," + str(tableid) + "," + str(tableinfo[4]) + newline)
-                else:
-                    f.write(  tableinfo[0]  + "," + str(tableinfo[1]) + "," + str(tableid) + ",BASE" + newline)
+    with file_write_lock:
+        with codecs.open(extractedTables_out, "a", common.charset) as f:
+            while True:
+                try:
+                    owner,tableinfo= qSuccess.get_nowait()
+                    splits = tableinfo[0].split('.')
+                    table = splits[1]
+                    tableid = tableinfo[3]
+                    if  tableinfo[4]:
+                        f.write(  tableinfo[0]  + "," + str(tableinfo[1]) + "," + str(tableid) + "," + str(tableinfo[4]) + newline)
+                    else:
+                        f.write(  tableinfo[0]  + "," + str(tableinfo[1]) + "," + str(tableid) + ",BASE" + newline)
 
-                logging.info("Extraction of table %s [tableID: %s]  was successful"%(tableinfo[0],tableid))
-                logging.info("%s"%(common.dividerline))
-                logging.info("Adding entry in %s file %sfor table: %s [tableID: %s]"%(extractedTables_out,newline,tableinfo[0],tableid))
-                tables_count.value += 1
-                progressBar(tables_count,fail_count,total_table)
+                    logging.info("Extraction of table %s [tableID: %s]  was successful"%(tableinfo[0],tableid))
+                    logging.info("%s"%(common.dividerline))
+                    logging.info("Adding entry in %s file %sfor table: %s [tableID: %s]"%(extractedTables_out,newline,tableinfo[0],tableid))
+                    f.flush()
+                    tables_count.value += 1
+                    progressBar(tables_count,fail_count,total_table)
 
-                if total_table.value == tables_count.value + fail_count.value:
+                    if total_table.value == tables_count.value + fail_count.value:
+                        break
+
+                except Exception as exp:
                     break
-
-            except Exception as exp:
-                break
-    f.close()
+        f.close()
 
 # Function to display extraction progress
 def progressBar(current,fail_count,total_table):
@@ -1959,32 +2056,33 @@ def progressBar(current,fail_count,total_table):
         print("%s"%(common.dividerline))
 
 # Function which will table failed with exception in failure file
-def updateFailureStatus(qFail,batch,total_table,tables_count,fail_count):
+def updateFailureStatus(qFail,batch,total_table,tables_count,fail_count,file_write_lock):
     if batch != 0:
         global extractedFailures_err
         extractedFailures_err = "%s%sextractFailure_Batch_%s.err"%(migrationpath,path_sep,batch)
-    with codecs.open(extractedFailures_err, "a", common.charset) as f:
-        while True:
-            try:
-                owner,tableName,tableid,exp= qFail.get_nowait()
-                f.write("%s Failed to extract "%(newline)+ owner + "." + tableName + " [tableID: "+ tableid+"]" + newline)
-                f.write(str(exp))
-                logging.error("Adding entry in %s file %sfor table : %s.%s [tableID: %s]"%(extractedFailures_err,newline,owner,tableName,tableid))
-                f.close()
-                fail_count.value += 1
-                progressBar(tables_count,fail_count,total_table)
-                if total_table.value == tables_count.value + fail_count.value:
+    with file_write_lock:
+        with codecs.open(extractedFailures_err, "a", common.charset) as f:
+            while True:
+                try:
+                    owner,tableName,tableid,exp= qFail.get_nowait()
+                    f.write("%s Failed to extract "%(newline)+ owner + "." + tableName + " [tableID: "+ tableid+"]" + newline)
+                    f.write(str(exp))
+                    f.flush()
+                    logging.error("Adding entry in %s file %sfor table : %s.%s [tableID: %s]"%(extractedFailures_err,newline,owner,tableName,tableid))
+                    f.close()
+                    fail_count.value += 1
+                    progressBar(tables_count,fail_count,total_table)
+                    if total_table.value == tables_count.value + fail_count.value:
+                        break
+                except Exception as exp:
                     break
-
-            except Exception as exp:
-                break
-    f.close()
+        f.close()
 
 # Function to extract data using temporary options
 # which takes queue and get tablename to be extracted from that queue
 # and connection string from a list
 # This function is not for 16.1 SP01 and 16.0 SP11 versions
-def extract_single(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables_count,fail_count):
+def extract_single(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables_count,fail_count,file_write_lock):
     global compressed_data
     if log_q:
         qh = QueueHandler(log_q)
@@ -2027,7 +2125,7 @@ def extract_single(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables
 
                 npath = folder
                 if platform.system() == "Windows" and npath.startswith("\\"):
-                    npath1 = "\{}".format(npath)
+                    npath1 = os.path.join("\\", npath)
                     cursor.execute("set temporary option temp_extract_directory = '%s'"%(npath1))
                 else:
                     cursor.execute("set temporary option temp_extract_directory = '%s'"%(npath))
@@ -2116,10 +2214,10 @@ def extract_single(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables
             lock.acquire()
             try:
                 PATH = '%s%s%s%s%sextractinfo'%(datapath,path_sep,tableid,path_sep,tableid)
-                if (os.path.isfile(PATH) and os.access(PATH, os.R_OK)) or os.path.isfile('%s%s%s%sesinfo'%(datapath,path_sep,tableid,path_sep)):
-                    updateUnloadStatus(qSuccess,batch,total_table,tables_count,fail_count)
+                if (os.path.isfile(PATH) and os.access(PATH, os.R_OK)):
+                    updateUnloadStatus(qSuccess,batch,total_table,tables_count,fail_count,file_write_lock)
                 if is_table_failed:
-                    updateFailureStatus(qFail,batch,total_table,tables_count,fail_count)
+                    updateFailureStatus(qFail,batch,total_table,tables_count,fail_count,file_write_lock)
 
             finally:
                 lock.release() #release lock
@@ -2138,7 +2236,7 @@ def extract_single(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables
             if str(exp) != "":
                 logging.error("Unexpected error in extract_single() reported while extracting data: %s"%str(exp))
                 qFail.put((owner,tableName,tableid,exp))
-                updateFailureStatus(qFail,batch,total_table,tables_count,fail_count)
+                updateFailureStatus(qFail,batch,total_table,tables_count,fail_count,file_write_lock)
             else:
                 return
 
@@ -2155,10 +2253,7 @@ def form_select_for_lobbfile(tablename,conn,path_to_copy):
     column_domain_list = []
     for i in cursor3:
         column_domain_list.append(i)
-    if common.object_store.lower() == 'azure':
-        obj_path = "bb://%s/Extracted_Data/%s/"%(common.az_container_name,tableid)
-    else:
-        obj_path = "s3://%s/Extracted_Data/%s/"%(common.aws_bucket,tableid)
+    obj_path = "hdlfs:///%s/Extracted_Data/%s/"%(common.hdlfs_directory,tableid)
 
     cmd = "SELECT "
     filelst = []
@@ -2209,6 +2304,7 @@ def form_load_table_bfilesequential(tablename, conn, path_to_copy,parl):
     tableid = tablename[3]
     with codecs.open("%s%s%s.sql"%(path_to_copy,path_sep,tableid), "w", common.charset) as f1:
         f1.write("set temporary option \"auto_commit\" = 'OFF';"+ "%s%s"%(newline,newline))
+        f1.write("set temporary option disable_ri_check= 'on';"+ "%s%s"%(newline,newline))
         f1.write("COMMIT;" + newline)
         f1.write("BEGIN TRANSACTION;" + newline)
 
@@ -2271,24 +2367,12 @@ def form_load_table_bfilesequential(tablename, conn, path_to_copy,parl):
                 l.append(var)
                 i = i + 1
 
-        if common.object_store.lower() == 'azure':
-            obj_path = "bb://%s/Extracted_Data/%s/"%(common.az_container_name,tableid)
-            for lst in l:
-                filelst.append("'"+obj_path+lst+"'")
+        obj_path = "hdlfs:///%s/Extracted_Data/%s/"%(common.hdlfs_directory,tableid)
+        for lst in l:
+            filelst.append("'"+obj_path+str(lst)+"'")
 
-            my_string = ','.join(map(str, filelst))
-            f1.write(my_string )
-            f1.write(newline + tab + "connection_string " + "'"+ common.connection_string+ "'")
-        else:
-            obj_path = "s3://%s/Extracted_Data/%s/"%(common.aws_bucket,tableid)
-            for lst in l:
-                filelst.append("'"+obj_path+lst+"'")
-
-            my_string = ','.join(map(str, filelst))
-            f1.write(my_string )
-            f1.write(newline + tab + "ACCESS_KEY_ID " + "'"+ common.aws_access_key+ "'")
-            f1.write(newline + tab + "SECRET_ACCESS_KEY " + "'"+ common.aws_secret_key+ "'")
-            f1.write(newline + tab + "REGION " + "'"+ common.aws_region+ "'")
+        my_string = ','.join(map(str, filelst))
+        f1.write(my_string )
 
         f1.write(newline + tab + "escapes off quotes on")
         f1.write(newline + tab + "row delimited by \'\\" + "n" "'"+";")
@@ -2353,7 +2437,7 @@ def extract_single_sequential(q, connstr_port,total_table,batch,log_q,qSuccess,q
 
             npath = folder
             if platform.system() == "Windows" and npath.startswith("\\"):
-                npath1 = "\{}".format(npath)
+                npath1 = os.path.join("\\", npath)
                 cursor.execute("set temporary option temp_extract_directory = '%s'"%(npath1))
             else:
                 cursor.execute("set temporary option temp_extract_directory = '%s'"%(npath))
@@ -2438,9 +2522,9 @@ def extract_single_sequential(q, connstr_port,total_table,batch,log_q,qSuccess,q
                 PATH1 = '%s%s%s%s%s_1.txt'%(datapath,path_sep,tableid,path_sep,tableid)
 
                 if (((os.path.isfile(PATH)) or (os.path.isfile(PATH1))) and is_table_failed == False):
-                    updateUnloadStatus(qSuccess,batch,total_table,tables_count,fail_count)
+                    updateUnloadStatus(qSuccess,batch,total_table,tables_count,fail_count,file_write_lock)
                 if is_table_failed :
-                    updateFailureStatus(qFail,batch,total_table,tables_count,fail_count)
+                    updateFailureStatus(qFail,batch,total_table,tables_count,fail_count,file_write_lock)
             finally:
                 lock.release() #release lock
 
@@ -2454,7 +2538,7 @@ def extract_single_sequential(q, connstr_port,total_table,batch,log_q,qSuccess,q
         except Exception as exp:
             if str(exp) != "":
                 logging.error("Unexpected error reported in extract_single_sequential() while extracting data: \n%s"%str(exp))
-                updateFailureStatus(qFail,batch,total_table,tables_count,fail_count)
+                updateFailureStatus(qFail,batch,total_table,tables_count,fail_count,file_write_lock)
             else:
                 return
 
@@ -2475,17 +2559,21 @@ def connect_list(connectstr):
     connrecords = cursor.fetchall()
     logging.info("%s"%(common.dividerline))
     logging.info("Total number of active MPX reader nodes: %s"% len(connrecords))
+
     for i in connrecords:
-        connvarstr = 'DRIVER={%s};%s;UID=%s;PWD=%s;ENC=%s' %(common.driver, i[0], common.userid, common.password, common.enc_string )
-        node_connect_str.append((connvarstr,i[0]))
+        full_host = i[0].replace(f"host={common.hostname.split('.')[0]}:", f"host={common.hostname}:")
+        connvarstr = 'DRIVER={%s};%s;UID=%s;PWD=%s;ENC=%s' % (common.driver, full_host, common.userid, common.password, common.enc_string)
+        node_connect_str.append((connvarstr, full_host))
 
     cursor.execute("select connection_info from sp_iqmpxinfo() where (role= 'writer' and status='included' and inc_state='active');")
     connrecords = cursor.fetchall()
     logging.info("Total number of active MPX writer nodes: %s"% len(connrecords))
     logging.info("%s"%(common.dividerline))
+
     for i in connrecords:
-        connvarstr = 'DRIVER={%s};%s;UID=%s;PWD=%s;ENC=%s' %(common.driver, i[0], common.userid, common.password, common.enc_string )
-        node_connect_str.append((connvarstr,i[0]))
+        full_host = i[0].replace(f"host={common.hostname.split('.')[0]}:", f"host={common.hostname}:")
+        connvarstr = 'DRIVER={%s};%s;UID=%s;PWD=%s;ENC=%s' % (common.driver, full_host, common.userid, common.password, common.enc_string)
+        node_connect_str.append((connvarstr, full_host))
 
     for i in range(len(node_connect_str)):
         total_connection_per_node = []
@@ -2501,24 +2589,33 @@ def connect_list(connectstr):
 
 # Function which display the CLI to be used to copy extracted data to object store
 def display_clicopy_command(batch):
-    copy_cmd = ""
-    if common.object_store.lower() == 'azure':
-        copy_cmd = "az storage blob upload-batch --connection-string \"DefaultEndpointsProtocol=https;AccountName=<Azure Account Name>;%sAccountKey=<Azure Account Key>;EndpointSuffix=core.windows.net\" -d %s -s %s"%(newline,common.az_container_name,migrationpath)
-    else:
-        copy_cmd = "aws s3 cp %s s3://%s/ --recursive"%(migrationpath, common.aws_bucket)
     logging.info("%s"%(common.double_divider_line))
     logging.info("Next Steps:%s%s1. Copy data on Object store."%(newline,newline))
-    logging.info("%sSample command to copy the data on %s object store:%s%s "%(newline,common.object_store,newline,copy_cmd))
+    logging.info("%sSample command to copy the data on data lake Files object store:"%(newline))
+    logging.info("%spython3 copy_hdlfs.py --config_file <migration config file path>"%newline) 
+    logging.info("%s"%(common.double_divider_line))
     batches_count = count_batches_generated_failed()
     if batch == 0 or batch == batches_count:
         failure_backup_count = count_failure_backup_files()
         if not os.path.isfile('%s%sno_extraction.list'%(migrationpath,path_sep)) and failure_backup_count == 0:
             logging.info("%s2. Run load utility (load_schema_and_data.py)"%newline)
+            if onlydata == 'y':
+                logging.info("%sSample command to run load utility for data load :"%newline)
+                logging.info("%spython3 load_schema_and_data.py --config_file <config file path> --onlydata y"%newline)
+            if fullextraction == 'y':
+                logging.info("%sSample command to run load utility for schema and data load :"%newline)
+                logging.info("%spython3 load_schema_and_data.py --config_file <config file path> --fullload y"%newline) 
             logging.info("%s"%(common.double_divider_line))
         elif os.path.isfile('%s%sno_extraction.list'%(migrationpath,path_sep)) and failure_backup_count == 0:
             common.print_and_log(no_extraction_warning_msg)
             logging.info("%s"%(common.double_divider_line))
             logging.info("%s2. Run load utility (load_schema_and_data.py)"%newline)
+            if onlydata == 'y':
+                logging.info("%sSample command to run load utility for data load :"%newline)
+                logging.info("%spython3 load_schema_and_data.py --config_file <config file path> --onlydata y"%newline)
+            if fullextraction == 'y':
+                logging.info("%sSample command to run load utility for schema and data load :"%newline)
+                logging.info("%spython3 load_schema_and_data.py --config_file <config file path> --fullload y"%newline)
             logging.info("%s"%(common.double_divider_line))
 
 # Function which read extractedTables_out file into a list and returns its count
@@ -2609,48 +2706,84 @@ def get_byteorder():
 # At the end it will also check if all tables are extracted or not
 def extract_main(batch):
 
-    global q_listener,log_q,logger
+    global q_listener, log_q, logger
     if not is_windows:
         log_q = None
 
-    if len(extract_list) !=0:
+    if len(extract_list) != 0:
         str1 = "Starting data unload"
         common.print_and_log(str1)
-        logging.info("%s"%(common.dividerline))
-        print("For unload progress of tables, please check file : %s%s"%(newline,migration_log))
+        logging.info("%s" % (common.dividerline))
+        print("For unload progress of tables, please check file : %s%s" % (newline, migration_log))
 
     start = datetime.datetime.now()
 
     qSuccess = multiprocessing.Queue()
     qFail = multiprocessing.Queue()
+    file_write_lock = multiprocessing.Lock()
     connect_list(connectstr)
 
-    if parallel_extract == 0:
-        extract_fun = extract_single_sequential
-    else:
-        extract_fun = extract_single
+    extract_fun = extract_single
 
     if batch != 0:
         global extractedFailures_err
-        extractedFailures_err = "%s%sextractFailure_Batch_%s.err"%(migrationpath,path_sep,batch)
+        extractedFailures_err = "%s%sextractFailure_Batch_%s.err" % (migrationpath, path_sep, batch)
 
     if os.path.isfile(extractedFailures_err):
         os.remove(extractedFailures_err)
 
-    process = []
+    process_trackers = []
+    restart_counts = {}  # Track restarts for each conn_info
+    RESTART_LIMIT = 3    # Max restarts allowed per connection
+
     for i in range(nodes_count):
         node_connect_list = connection_list[i]
         node_extract_list = extract_list[i]
         nodesqueue = multiprocessing.Queue()
         for item in node_extract_list:
             nodesqueue.put(item)
-        for i in range(len(node_connect_list)):
-            p = multiprocessing.Process(target=extract_fun, args=(nodesqueue, node_connect_list[i],total_table,batch,log_q,qSuccess,qFail,tables_count,fail_count))
-            process.append(p)
+
+        node_processes = []
+
+        def start_worker(conn_info):
+            p = multiprocessing.Process(
+                target=extract_fun,
+                args=(nodesqueue, conn_info, total_table, batch, log_q, qSuccess, qFail, tables_count, fail_count, file_write_lock)
+            )
             p.start()
- 
-    for p in process:
-        p.join()
+            return p
+
+        for conn_info in node_connect_list:
+            p = start_worker(conn_info)
+            node_processes.append((p, conn_info))
+            restart_counts[conn_info] = 0  # Initialize restart count
+
+        process_trackers.append((nodesqueue, node_processes))
+
+    # Monitor and restart dead processes
+    while any(nodesqueue.qsize() > 0 for nodesqueue, _ in process_trackers):
+        for nodesqueue, node_processes in process_trackers:
+            for idx, (proc, conn_info) in enumerate(node_processes):
+                if not proc.is_alive():
+                    if nodesqueue.qsize() > 0:
+                        if restart_counts[conn_info] < RESTART_LIMIT:
+                            logging.warning(f"Restarting dead process for {conn_info} (attempt {restart_counts[conn_info] + 1})")
+                            new_proc = multiprocessing.Process(
+                                target=extract_fun,
+                                args=(nodesqueue, conn_info, total_table, batch, log_q, qSuccess, qFail, tables_count, fail_count, file_write_lock)
+                            )
+                            new_proc.start()
+                            node_processes[idx] = (new_proc, conn_info)
+                            restart_counts[conn_info] += 1
+                        else:
+                            logging.error(f"Restart limit exceeded for connection: {conn_info}. No further restart attempts.")
+        time.sleep(5)
+
+    # Ensure all processes have completed
+    for _, node_processes in process_trackers:
+        for proc, _ in node_processes:
+            proc.join()
+
 
     total_elap_sec = common.elap_time(start)
     days, hours, minutes, seconds = common.calculate_time(total_elap_sec)
@@ -2972,40 +3105,82 @@ if __name__ == '__main__':
     print ("The current working directory: %s%s" % (newline,path))
     print("%s"%(common.dividerline))
     total_strt = datetime.datetime.now()
-    get_inputs(config_file)
-    mpx_verify(connectstr)
-    version_verify(connectstr)
-    charset_verify()
-    get_byteorder()
-    if dbmode=='r':
-        db_readonly_verify(connectstr)
-
-    check_create_dataextractdir()
-
     global batch
-    batch = 0
-    if common.batch_size != 0:
-        batch = 1
-    check_and_create_iq_tables_file(connectstr)
 
-    schema_unload_and_modify(connectstr)
-    if batch != 0 :
-        extracted_batch_file_exist()
-    else:
-        get_unload_table_list(batch)
-        extract_main(batch)
+    if onlyschema == 'y':
+        # Schema-only execution
+        get_inputs(config_file)
+        mpx_verify(connectstr)
+        version_verify(connectstr)
+        charset_verify()
+        get_byteorder()
+        if dbmode == 'r':
+            db_readonly_verify(connectstr)
+        schema_unload_and_modify(connectstr)
+
+    elif onlydata == 'y':
+        # Data-only execution (ask user if schema is already unloaded)
+        confirmation = input("Have you already unloaded the schema? (yes/no): ").strip().lower()
+        if confirmation != 'yes':
+            sys.exit("Error: Please unload schema first before running data-only mode.")
+
+        get_inputs(config_file)
+        check_create_dataextractdir()
+
+        #global batch
+        batch = 0
+        if common.batch_size != 0:
+            batch = 1
+        check_and_create_iq_tables_file(connectstr)
+
+        if batch != 0:
+            extracted_batch_file_exist()
+        else:
+            get_unload_table_list(batch)
+            extract_main(batch)
+
+    elif fullextraction == 'y':
+        # Full extraction mode (schema + data)
+        get_inputs(config_file)
+        mpx_verify(connectstr)
+        version_verify(connectstr)
+        charset_verify()
+        get_byteorder()
+        if dbmode == 'r':
+            db_readonly_verify(connectstr)
+
+        check_create_dataextractdir()
+        schema_unload_and_modify(connectstr)
+
+        #global batch
+        batch = 0
+        if common.batch_size != 0:
+            batch = 1
+        check_and_create_iq_tables_file(connectstr)
+
+        if batch != 0:
+            extracted_batch_file_exist()
+        else:
+            get_unload_table_list(batch)
+            extract_main(batch)
 
     print("%s"%(common.dividerline))
     print("Migration path : %s%s"%(newline,migrationpath))
     print("%s"%(common.dividerline))
-    print("Data Extraction path : %s%s"%(newline,datapath))
-    print("%s"%(common.dividerline))
-    print("Migration completed. %sPlease check file for details :%s%s"%(newline,newline,migration_log))
+    if fullextraction == 'y' or onlydata == 'y' :  
+       print("Data Extraction path : %s%s"%(newline,datapath))
+       print("%s"%(common.dividerline))
+    print("Migration Utility completed. %sPlease check file for details :%s%s"%(newline,newline,migration_log))
     print("%s"%(common.dividerline))
     total_elaptime = common.elap_time(total_strt)
     days, hours, minutes, seconds = common.calculate_time(total_elaptime)
+    if onlyschema == 'y' :
+        logging.info("%s"%(common.double_divider_line))
+        logging.info("Next Steps:%s%s1. Run load utility (load_schema_and_data.py) for schema load."%(newline,newline))
+        logging.info("%sSample command to run load utility for schema load :"%newline)
+        logging.info("%spython3 load_schema_and_data.py --config_file <config file path> --onlyschema y"%newline)
+        logging.info("%s"%(common.double_divider_line))
     logging.info("Total Time taken in migration utility : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0]))
     print("Total Time taken in migration utility : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0]))
     logging.info("%s"%(common.dividerline))
     print("%s"%(common.dividerline))
-

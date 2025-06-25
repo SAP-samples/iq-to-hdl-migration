@@ -48,7 +48,7 @@ def file_input(config_file,util):
         global data
         data = json.load(f)
     except ValueError:
-        sys.exit("%sInvalid json config file: %s. %sCorrect the file and rerun %s utility."%(newline,newline,config_file,util)) # in case json is invalid
+        sys.exit("%sInvalid JSON configuration file: %s.%s contains errors. Please correct the file and re-run the %s Utility."%(newline,newline,config_file,util)) # in case json is invalid
     else:
         config_valid_str = "\nInput json config file: %s is valid" %(config_file) # in case json is valid
 
@@ -144,93 +144,53 @@ def get_inputs(config_file,util):
     ipaddress = socket.gethostbyname(host)
     fullhostname = socket.getfqdn(ipaddress)
 
-def object_store_azure(config_file):
+def object_store_hdlfs(config_file):
 
     global w
     w = list()
-    w.append('Azure_Account_Name')
-    w.append('Azure_Account_Key')
-    w.append('Container_Name')
+    w.append('Directory_Name')
+    w.append('Files_endpoint')
+    w.append('Cert_path')
+    w.append('Key_path')
 
     global t
     t = list()
-    for i in data['Hyperscaler_Details']['Credentials']:
+    for i in data['HDLFS_Configuration']:
         t.append(i)
 
     w.sort()
     t.sort()
 
     if not w == t:
-        sys.exit("Hyperscaler_Details are not correct in in %s file"%config_file)
+        sys.exit("HDLFS_Configuration are not correct in %s file"%config_file)
 
-    global az_container_name
-
-    global connection_string
-    for i in data['Hyperscaler_Details']['Credentials']:
-        value = data['Hyperscaler_Details']['Credentials'][i]
-        if i == 'Azure_Account_Name':
+    global hdlfs_directory
+    global hdlfs_files_endpoint
+    global hdlfs_cert_path
+    global hdlfs_key_path
+    for i in data['HDLFS_Configuration']:
+        value = data['HDLFS_Configuration'][i]
+        if i == 'Directory_Name':
             if (not (value and value.strip())) :
-                sys.exit("Please enter valid string value for Azure_Account_Name in %s file"%config_file)
+                sys.exit("Please enter valid string value for Directory_Name in %s file"%config_file)
             else:
-                az_account_name = data['Hyperscaler_Details']['Credentials'][i]
-        elif i == 'Azure_Account_Key':
+                hdlfs_directory = data['HDLFS_Configuration'][i]
+        elif i == 'Files_endpoint':
             if (not (value and value.strip())) :
-                sys.exit("Please enter valid string value for Azure_Account_Key in %s file"%config_file)
+                sys.exit("Please enter valid string value for Files_endpoint in %s file"%config_file)
             else:
-                az_key = data['Hyperscaler_Details']['Credentials'][i]
+               hdlfs_files_endpoint = data['HDLFS_Configuration'][i]
+        elif i == 'Cert_path':
+            if (not (value and value.strip())) :
+                sys.exit("Please enter valid string value for Cert_path in %s file"%config_file)
+            else:
+                hdlfs_cert_path = data['HDLFS_Configuration'][i]
         else:
             if (not (value and value.strip())) :
-                sys.exit("Please enter valid string value for Container_Name in %s file"%config_file)
+                sys.exit("Please enter valid string value for Key_path in %s file"%config_file)
             else:
-                az_container_name = data['Hyperscaler_Details']['Credentials'][i]
-    connection_string = "DefaultEndpointsProtocol=https;AccountName=%s;AccountKey=%s;EndpointSuffix=core.windows.net"%(az_account_name,az_key)
+                hdlfs_key_path = data['HDLFS_Configuration'][i]
 
-def object_store_aws(config_file):
-
-    global w
-    w = list()
-    w.append('AWS_Access_Key_Id')
-    w.append('AWS_Secret_Access_Key')
-    w.append('AWS_Region')
-    w.append('Bucket_Name')
-
-    global t
-    t = list()
-    for i in data['Hyperscaler_Details']['Credentials']:
-        t.append(i)
-
-    w.sort()
-    t.sort()
-
-    if not w == t:
-        sys.exit("Hyperscaler_Details are not correct in in %s file"%config_file)
-
-    global aws_access_key
-    global aws_secret_key
-    global aws_region
-    global aws_bucket
-    for i in data['Hyperscaler_Details']['Credentials']:
-        value = data['Hyperscaler_Details']['Credentials'][i]
-        if i == 'AWS_Access_Key_Id':
-            if (not (value and value.strip())) :
-                sys.exit("Please enter valid string value for AWS_Access_Key_Id in %s file"%config_file)
-            else:
-                aws_access_key = data['Hyperscaler_Details']['Credentials'][i]
-        elif i == 'AWS_Secret_Access_Key':
-            if (not (value and value.strip())) :
-                sys.exit("Please enter valid string value for AWS_Secret_Access_Key in %s file"%config_file)
-            else:
-                aws_secret_key = data['Hyperscaler_Details']['Credentials'][i]
-        elif i == 'AWS_Region':
-            if (not (value and value.strip())) :
-                sys.exit("Please enter valid string value for AWS_Region in %s file"%config_file)
-            else:
-                aws_region = data['Hyperscaler_Details']['Credentials'][i]
-        else:
-            if (not (value and value.strip())) :
-                sys.exit("Please enter valid string value for Bucket_Name in %s file"%config_file)
-            else:
-                aws_bucket = data['Hyperscaler_Details']['Credentials'][i]
 
 def host_validation(config_file,util):
     import pyodbc
@@ -299,6 +259,26 @@ def host_validation(config_file,util):
         if role != 0:
             sys.exit("Please enter the value of port_number as coordinator port in %s file"%config_file)
  
+def premig_inputs(config_file,util):
+
+    file_input(config_file,util)
+
+    global same_host
+    if same_host == False:
+        global client_id
+        client_id = data['IQ_Host_Login_Id']
+
+        if (not (client_id and client_id.strip()) or client_id.startswith('<Optional')) :
+            sys.exit("Please enter valid string value for IQ_Host_Login_Id in %s file"%config_file)
+
+        global client_pwd
+        if ('IQ_Host_Login_Pwd' in data) :
+            client_pwd = data['IQ_Host_Login_Pwd']
+            if (not (client_pwd and client_pwd.strip()) or client_pwd.startswith('<Optional')) :
+                client_pwd = getpass.getpass("Enter IQ host login password: ")
+        else :
+            client_pwd = getpass.getpass("Enter IQ host login password: ")
+
 def mig_inputs(config_file,util):
 
     file_input(config_file,util)
@@ -311,7 +291,7 @@ def mig_inputs(config_file,util):
         sys.exit("Please enter valid string value for Extract_Path in %s file"%config_file)
 
     if driv == "Windows" and shared_path.startswith("\\"):
-        shared_path = "\{}".format(shared_path)
+        shared_path = os.path.join("\\", shared_path)
 
     global conn_num
     conn_num = data['Client_Num_Conn']
@@ -332,19 +312,7 @@ def mig_inputs(config_file,util):
     if type(batch_size) != int or ( batch_size < batch_size_100GB and batch_size != 0 ):
         sys.exit("Please enter integer value greater than or equal to 100GB for Batch_Size in %s file"%config_file)
 
-    global object_store
-    object_store = data['Hyperscaler_Details']['Name']
-
-    if (not (object_store and object_store.strip())) :
-        sys.exit("Please enter valid string value for Hyperscaler_Details in %s file"%config_file)
-    # Validation of right hyperscaler names supported
-    elif not object_store.lower() == 'azure' and not object_store.lower() == 'aws':
-        sys.exit("Please select Hyperscaler_Details as Azure or AWS")
-
-    if object_store.lower() == 'azure':
-        object_store_azure(config_file)
-    elif object_store.lower() == 'aws':
-        object_store_aws(config_file)
+    object_store_hdlfs(config_file)
 
     if same_host == False:
         global client_id
@@ -414,25 +382,25 @@ def load_inputs(config_file,util):
 
     coord_host = data['HDL_Coord_Endpoint'] + ":" + port
 
-    global writer_host
+    global worker_host
     try:
-        writer_host = data['HDL_Writer_Endpoint']
+        worker_host = data['HDL_Worker_Endpoint']
     except KeyError:
-        sys.exit("Error: Please add HDL_Writer_Endpoint key in %s file"%config_file)
+        sys.exit("Error: Please add HDL_Worker_Endpoint key in %s file"%config_file)
 
-    if (not (writer_host and writer_host.strip())) :
-        sys.exit("Error: Please enter valid string value for HDL_Writer_Endpoint in %s file"%config_file)
+    if (not (worker_host and worker_host.strip())) :
+        sys.exit("Error: Please enter valid string value for HDL_Worker_Endpoint in %s file"%config_file)
 
-    writer_host = data['HDL_Writer_Endpoint'] + ":" + port
+    worker_host = data['HDL_Worker_Endpoint'] + ":" + port
 
-    global writer_conn_num
+    global worker_conn_num
     try:
-        writer_conn_num = data['HDL_Num_Writer_Conn']
+        worker_conn_num = data['HDL_Num_Worker_Conn']
     except KeyError:
-        sys.exit("Error: Please add HDL_Num_Writer_Conn key in %s file"%config_file)
+        sys.exit("Error: Please add HDL_Num_Worker_Conn key in %s file"%config_file)
 
-    if type(writer_conn_num) != int or (writer_conn_num < 0):
-        sys.exit("Error: Please enter positive integer value for HDL_Num_Writer_Conn in %s file"%config_file)
+    if type(worker_conn_num) != int or (worker_conn_num < 0):
+        sys.exit("Error: Please enter positive integer value for HDL_Num_Worker_Conn in %s file"%config_file)
 
     # coord_conn_num is optional field
     global coord_conn_num
@@ -456,7 +424,7 @@ def load_inputs(config_file,util):
         sys.exit("Error: Please add Extract_Path key in %s file"%config_file)
 
     if platform.system() == "Windows" and extract_path.startswith("\\"):
-        extract_path = "\{}".format(extract_path)
+        extract_path = os.path.join("\\", extract_path)
 
     global Datalake_Client_Install_Path
     try:
@@ -466,19 +434,7 @@ def load_inputs(config_file,util):
     if (not (Datalake_Client_Install_Path and Datalake_Client_Install_Path.strip())) :
         sys.exit("Please enter valid Datalake_Client_Install_Path in %s file"%config_file)
 
-    global object_store
-    object_store = data['Hyperscaler_Details']['Name']
-
-    if (not (object_store and object_store.strip())) :
-        sys.exit("Please enter valid string value for Hyperscaler_Details in %s file"%config_file)
-    # Validation of right hyperscaler names supported
-    elif not object_store.lower() == 'azure' and not object_store.lower() == 'aws':
-        sys.exit("Please select Hyperscaler_Details as Azure or AWS")
-
-    if object_store.lower() == 'azure':
-        object_store_azure(config_file)
-    elif object_store.lower() == 'aws':
-        object_store_aws(config_file)
+    object_store_hdlfs(config_file)
 
     global Object_Store_Copy_Validation
     try:

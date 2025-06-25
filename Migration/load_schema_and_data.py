@@ -28,38 +28,83 @@ import json
 import logging
 import codecs
 import sqlanydb
+import json, urllib3
 from logging.handlers import QueueHandler, QueueListener
 
 try:
-   from azure.storage.blob import BlobServiceClient
+   import requests
 except:
-   BlobServiceClient = None
-
-try:
-   import boto3
-except:
-    boto3 = None
+   requests = None
 
 argv = sys.argv[1:]
 # total arguments passed
 n = len(sys.argv)
 
-if not(n == 3 or n==2):
-    sys.exit("Error: Incorrect/Invalid number of arguments. Run load_schema_and_data.py with -h or --help for help")
+# Defaults
+config_file = ''
+onlyschema = 'n'
+onlydata = 'n'
+fullload = 'n'
+
+# Handle help first
+if '-h' in argv or '--help' in argv:
+    print('''
+Usage:
+    load_schema_and_data.py --config_file <config file path> [--onlyschema y] [--onlydata y] [--fullload y]
+Same as:
+    load_schema_and_data.py -f <config file path> [-s y] [-d y] [-e y]
+
+Switch Details:
+    --config_file or -f  : Mandatory. Denotes utilizing the config file to access parameters from.
+    --onlyschema or -s   : Optional. To run the load utility only for schema load. Use 'y' to load only schema.
+    --onlydata or -d     : Optional. To run the load utility only for data load. Use 'y' to load only data.
+    --fullload or -e     : Optional. To run the load utility for both schema and data load. Use 'y' to load both schema and data.
+
+Note:
+    Only one of --onlyschema, --onlydata, or --fullload can be 'y'. They are mutually exclusive.
+    One of the three options must be provided and set to 'y'.
+        ''')
+    sys.exit()
+
+# Validate for incorrect short forms like -onlyschema etc.
+for arg in argv:
+    if arg.startswith('-') and not arg.startswith('--'):
+        if arg not in ['-h', '-f', '-s', '-d', '-e']:
+            print(f"Error: Unsupported or incorrectly formatted option '{arg}'. Use proper short or long options.")
+            sys.exit(2)
 
 try:
-    opts, args = getopt.getopt(argv,"ht:f:",["help","config_file="])
+    opts, args = getopt.getopt(argv, "hf:s:d:e:", ["help", "config_file=", "onlyschema=", "onlydata=", "fullload="])
 except getopt.GetoptError:
-    print ('Error : Unsupported option/values. Run load_schema_and_data.py -h or --help for help')
+    print("Error : Unsupported option/values. Run load_schema_and_data.py -h or --help for help")
     sys.exit(2)
+
 for opt, arg in opts:
-    if opt in ("-h", "--help"):
-        print ('usage:\nload_schema_and_data.py --config_file <config file path>')
-        print ('which is the same as:\nload_schema_and_data.py -f <config file path>')
-        print ('Switch --config_file or -f denote utilizing the config file to access parameters from.')
-        sys.exit()
-    elif opt in ("-f", "--config_file"):
+    if opt in ("-f", "--config_file"):
         config_file = arg
+    elif opt in ("-s", "--onlyschema"):
+        if arg.lower() != 'y':
+            sys.exit("Error: --onlyschema or -s only supports 'y'. Use this option only if you want to load only schema.")
+        onlyschema = arg.lower()
+    elif opt in ("-d", "--onlydata"):
+        if arg.lower() != 'y':
+            sys.exit("Error: --onlydata or -d only supports 'y'. Use this option only if you want to load only data.")
+        onlydata = arg.lower()
+    elif opt in ("-e", "--fullload"):
+        if arg.lower() != 'y':
+            sys.exit("Error: --fullload or -e only supports 'y'. Use this option only if you want to load both schema and data.")
+        fullload = arg.lower()
+
+# Check if config_file is provided
+if config_file.strip() == '':
+    sys.exit("Error: --config_file or -f is a mandatory option. Please specify a valid config file path.")
+
+# Validation for mutual exclusivity
+flags = [onlyschema == 'y', onlydata == 'y', fullload == 'y']
+if flags.count(True) > 1:
+    sys.exit("Error: --onlyschema, --onlydata, and --fullload are mutually exclusive. Only one can be 'y'. Run load_schema_and_data.py -h or --help for help.")
+elif flags.count(True) == 0:
+    sys.exit("Error: One of --onlyschema, --onlydata, or --fullload must be 'y'. Run load_schema_and_data.py -h or --help for help.")
 
 # detect the current working directory and print it
 path = os.getcwd()
@@ -96,6 +141,8 @@ lock = multiprocessing.Lock()
 tables_count = multiprocessing.Value(ctypes.c_int, 0)
 fail_count = multiprocessing.Value(ctypes.c_int, 0)
 total_table = multiprocessing.Value(ctypes.c_int, 0)
+global data_path
+data_path =  "%s%sExtracted_Data"%(reload_file_location,path_sep)
 
 # Read the json config file and get all values
 def get_inputs(config_file):
@@ -103,17 +150,12 @@ def get_inputs(config_file):
     print ('Reading Config File: %s' %(config_file))
 
     #set paths
-    global data_path
-    data_path =  "%s%sExtracted_Data"%(reload_file_location,path_sep)
-
     global iqtables_list
     iqtables_list = "%s%siq_tables.list"%(reload_file_location,path_sep)
 
     global AutoUpdated_Reload_file
     AutoUpdated_Reload_file = "%s%sAutoUpdated_Reload.sql"%(reload_file_location,path_sep)
 
-    global Foreign_Key_Constraint_file
-    Foreign_Key_Constraint_file = "%s%sForeign_Key_Constraint.sql"%(reload_file_location,path_sep)
 
     global resume_mode
     resume_mode = False
@@ -121,41 +163,39 @@ def get_inputs(config_file):
     if os.path.isfile(HDLLoad_out):
         resume_mode = True
 
-
     if is_windows:
         global listener_q,log_q,logger
         listener_q,log_q,logger = logger_init()
     else:
-        if (resume_mode):
+        if (resume_mode or onlydata == 'y'):
             logging.basicConfig(filename=load_schema_and_data_log, filemode='a', format='%(message)s', level=logging.INFO)
         else:
             logging.basicConfig(filename=load_schema_and_data_log, filemode='w', format='%(message)s', level=logging.INFO)
 
+    if onlyschema == 'y':
+        logging.info("%s*************************************************************" % newline)
+        logging.info("[%s] : Schema Load Started." % datetime.datetime.now())
+        logging.info("*************************************************************")
+    elif onlydata == 'y':
+        logging.info("%s*************************************************************" % newline)
+        logging.info("[%s] : Data Load Started." % datetime.datetime.now())
+        logging.info("*************************************************************")
+    elif fullload == 'y':
+        logging.info("%s*************************************************************" % newline)
+        logging.info("[%s] : Schema and Data Load Started." % datetime.datetime.now())
+        logging.info("*************************************************************")
 
-    logging.info("%s*************************************************************"%newline)
-    logging.info("[%s] : Schema and Data Load Started."%(datetime.datetime.now()))
-    logging.info("*************************************************************")
     logging.info(common.config_valid_str)
-
-    # Validation of right hyperscaler names supported
-    if common.object_store.lower() == 'azure' or common.object_store.lower() == 'aws':
-        logging.info("%s"%(common.dividerline))
-        logging.info("Selected Object_store = %s"%common.object_store)
 
     if common.w == common.t:
         logging.info( "%sConfiguration file is correct and Reading credentials "%newline)
         logging.info("%s"%(common.dividerline))
 
-    if common.object_store.lower() == 'azure':
-        if (common.Object_Store_Copy_Validation.lower() == 'yes' and BlobServiceClient == None):
-            sys.exit("Error: Module azure.storage.blob not found. %sPlease enter Object_Store_Copy_Validation as 'No' in %s file to proceed load without validating data copied to object store"%(newline,config_file))
-
-    else:
-        if (common.Object_Store_Copy_Validation.lower() == 'yes' and boto3 == None):
-            sys.exit("Error: Module boto3 not found. %sPlease enter Object_Store_Copy_Validation as 'No' in %s file to proceed load without validating data copied to object store"%(newline,config_file))
+    if (common.Object_Store_Copy_Validation.lower() == 'yes' and requests == None):
+        sys.exit("Error: Module requests not found. %sPlease enter Object_Store_Copy_Validation as 'No' in %s file to proceed load without validating data copied to object store"%(newline,config_file))
 
     logging.info("%s"%(common.dividerline))
-    logging.info("Data lake IQ common.charset: %s"%common.charset)
+    logging.info("Data Lake Relational Engine common.charset: %s"%common.charset)
 
 # Initialize logger with handler and queue the records and send them to handler
 # This function is applicable only for Windows OS as
@@ -167,7 +207,7 @@ def logger_init():
     q = multiprocessing.Queue()
     # this is the handler for all log records
     file_handler = logging.StreamHandler()
-    if (resume_mode):
+    if (resume_mode or onlydata == 'y'):
         file_handler = logging.FileHandler(load_schema_and_data_log,mode='a')
     else:
         file_handler = logging.FileHandler(load_schema_and_data_log,mode='w')
@@ -195,6 +235,7 @@ def validate_dir_and_files():
     if not os.path.isdir(reload_file_location):
         sys.exit("Error: Migration_Data directory %s does not exist"%(reload_file_location))
 
+    global data_path
     if not os.path.isdir(data_path):
         sys.exit("Error: Extracted_Data directory  %s does not exist"%(data_path))
 
@@ -207,22 +248,6 @@ def validate_dir_and_files():
                 sys.exit("Error: %s file is not complete. SAP recommends to re-run the migration utility."%(AutoUpdated_Reload_file))
             f.close()
 
-    Foreign_Key_Constraint_Present = False
-    if os.path.isfile(extractedTables_out):
-        with codecs.open(extractedTables_out, "r", common.charset) as f:
-            if ('FOREIGN' in f.read()):
-                Foreign_Key_Constraint_Present = True
-        f.close()
-    else:
-        sys.exit("Error: %s file does not exist"%(extractedTables_out))
-
-    if os.path.isfile(Foreign_Key_Constraint_file):
-        with codecs.open(Foreign_Key_Constraint_file, "r", common.charset) as f:
-            if ('Creation of Foreign_Key_Constraint.sql completed.' not in f.read()):
-                sys.exit("Error: %s file is not complete. SAP recommends to re-run the migration utility."%(Foreign_Key_Constraint_file))
-            f.close()
-    elif Foreign_Key_Constraint_Present:
-        sys.exit("Error: %s file does not exist"%(Foreign_Key_Constraint_file))
 
     if not os.path.isdir("%s%sHDL_Conn_Logs"%(reload_file_location,path_sep)):
         os.mkdir("%s%sHDL_Conn_Logs"%(reload_file_location,path_sep))
@@ -230,25 +255,34 @@ def validate_dir_and_files():
     if os.path.isfile(loadFailure_err):
         shutil.move(loadFailure_err,loadFailure_err_bkp)
 
+# validate required directories and files exists to proceed with load for onlyschema
+def validate_dir_and_files_onlyschema():
+    if not os.path.isdir(common.extract_path):
+        sys.exit("Error: Extract directory %s does not exist"%(common.extract_path))
+
+    if not os.path.isdir(reload_file_location):
+        sys.exit("Error: Migration_Data directory %s does not exist"%(reload_file_location))
+
+    if not os.path.isfile(AutoUpdated_Reload_file):
+        sys.exit("Error: %s file does not exist"%(AutoUpdated_Reload_file))
+    else:
+        with codecs.open(AutoUpdated_Reload_file, "r", common.charset) as f:
+            if ('Creation of AutoUpdated_Reload.sql completed.' not in f.read()):
+                sys.exit("Error: %s file is not complete. SAP recommends to re-run the migration utility."%(AutoUpdated_Reload_file))
+            f.close()
 
 #Function to load schema on HDL
-def load_schema_or_foreignkey(schema_flag, foreignkey_flag):
+def load_schema(schema_flag):
     #set permission to run shell scripts
     os.chmod("./load_schema.sh", stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     os.chmod("./load_table.sh", stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
     if schema_flag == 1:
-        str1 = "Schema load on Hana Datalake IQ started."
-        str2 = "Schema load on Hana Datalake IQ complete."
+        str1 = "Schema load on data lake Relational Engine started."
+        str2 = "Schema load on data lake Relational Engine complete."
         errmsg = "Error: Schema load failed."
         file1 = "Schema load"
         file2 = "%sAutoUpdated_Reload.sql"%(path_sep)
-    elif foreignkey_flag == 1:
-        str1 = "Foreign key constraints load on data lake IQ started."
-        str2 = "Foreign key constraints load on data lake IQ complete."
-        errmsg = "Error: Foreign key constraints load failed."
-        file1 = "Foreign Key Constraint load"
-        file2 = "%sForeign_Key_Constraint.sql"%(path_sep)
 
     common.print_and_log(str1)
     if is_windows:
@@ -290,7 +324,6 @@ def check_schema_load_required():
 
         f=codecs.open(load_schema_output_file,'r', enc)
         lines = f.readlines()
-
         for line in reversed(lines):
             if("Schema load log" in line.strip()):
                 break
@@ -299,113 +332,75 @@ def check_schema_load_required():
 
         if (error_found == True) or (os.stat(load_schema_output_file).st_size == 0):
             schema_load_needed = True
+        elif len(lines) <= 5:
+        # File only contains header or insufficient information
+            schema_load_needed = True
     else :
         schema_load_needed = True
     return schema_load_needed
 
-#Function to validate data uplaoded on Azure object store
-def validate_upload_azure(table):
-    # Instantiate a BlobServiceClient using a connection string
-    blob_service_client = BlobServiceClient.from_connection_string(common.connection_string)
+def validate_upload_hdlfs(tableid):
 
-    # Instantiate a ContainerClient
-    global container_client
-    container_client = blob_service_client.get_container_client(common.az_container_name)
-
-    # List the blobs in the container
-    blob_list = container_client.list_blobs()
     upload_success = False
-    tablename = table
-    pattern = "%s*.gz"%(tablename)
-    pattern1 = "%s*.inp"%(tablename)
-    pattern2 = "%s*.txt"%(tablename)
-    pattern3 = "%srow*"%(tablename)
+    pattern = "%s*.gz"%(tableid)
+    pattern1 = "%s*.inp"%(tableid)
+    pattern2 = "%s*.txt"%(tableid)
+    pattern3 = "%s_row*"%(tableid)
     file_count = 0
-    blob_count = 0
-    table_path = data_path + "/" +table
+    hdlfs_count = 0
+    global data_path
+    table_path = data_path + "/" +tableid
 
     for path, subdirs, files in os.walk(table_path):
         for name in files:
             if fnmatch(name, pattern) or fnmatch(name, pattern1) or fnmatch(name, pattern2) or fnmatch(name, pattern3):
                 file_count += 1
 
-    blob_list = container_client.list_blobs(name_starts_with='Extracted_Data')
-    for blob in blob_list:
-        if (table in blob.name) and (blob.name.endswith(".gz") or blob.name.endswith(".inp") or blob.name.endswith(".txt") or ("%srow"%(tablename) in blob.name)):
-            file_path = "%s%s%s"%(reload_file_location,path_sep,blob.name)
-            blob_size = blob.size
+    endpoint = common.hdlfs_files_endpoint
+    url="https://%s/webhdfs/v1/" %endpoint
 
+ 
+    container = endpoint.split('.files.')[0]
+    headers={
+        'x-sap-filecontainer':container,
+        'content-type': 'application/octet-stream'}
+    certificate = common.hdlfs_cert_path
+    key = common.hdlfs_key_path
+
+    cert = (certificate,key)
+
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    filename="/" + common.hdlfs_directory + "/Extracted_Data" + "/" +tableid
+    r = requests.get(url+filename,verify=False,headers=headers,cert=cert, params={'op':'LISTSTATUS'})
+    assert r.status_code ==200, r.text
+    # Use the json module to load CKAN's response into a dictionary.
+    response_dict = json.loads(r.content)
+
+    for i in response_dict['FileStatuses']['FileStatus']:
+        hdlfs_name = i["pathSuffix"]
+        if (tableid in hdlfs_name) and (hdlfs_name.endswith(".gz") or hdlfs_name.endswith(".inp") or hdlfs_name.endswith(".txt") or ("%s_row"%(tableid) in hdlfs_name)):
+            file_path = table_path + "/" + hdlfs_name
+            hdlfs_size = i["length"]
+            file_size = 0  # Initialize file_size with a default value
             if os.path.exists(file_path):
                 file_size = os.stat(file_path).st_size
             else:
-                logging.info("Table %s data copy failed on Azure blob store."%(table))
+                logging.info("Table %s data copy failed on data lake Files."%(tableid))
                 upload_success = False
 
-            if blob_size == file_size:
-                blob_count += 1
+            if hdlfs_size == file_size:
+                hdlfs_count += 1
 
-    logging.info("%s"%newline)
-
-    if (file_count == blob_count) and (file_count or blob_count):
-       logging.info("Table %s copied successfully on Azure blob store"%(table))
+    if (file_count == hdlfs_count) and (file_count or hdlfs_count):
+       logging.info("%s"%(common.dividerline))
+       logging.info("Table %s copied successfully on data lake Files"%(tableid))
        upload_success = True
     else:
-       files_not_uploaded = file_count - blob_count
-       logging.info("Table %s data copy failed on Azure blob store"%(table))
-       logging.info("File count mismatch. %s%s files not yet copied from %s to Azure blob store"%(newline,files_not_uploaded,table_path))
-       upload_success = False
-
-    return upload_success
-
-
-#Function to validate data uplaoded on AWS object store
-def validate_upload_aws(table):
-
-    resource = boto3.resource(
-    's3',
-    aws_access_key_id = common.aws_access_key,
-    aws_secret_access_key = common.aws_secret_key,
-    region_name = common.aws_region
-    )
-
-    bucket = resource.Bucket(common.aws_bucket)
-
-    tablename = table
-    pattern = "%s*.gz"%(tablename)
-    pattern1 = "%s*.inp"%(tablename)
-    pattern2 = "%s*.txt"%(tablename)
-    pattern3 = "%srow*"%(tablename)
-
-    upload_success = False
-    file_count = 0
-    object_count = 0
-    table_path = data_path + "/" + table
-
-    for path, subdirs, files in os.walk(table_path):
-        for name in files:
-            if fnmatch(name, pattern) or fnmatch(name, pattern1) or fnmatch(name, pattern2) or fnmatch(name, pattern3):
-                file_count += 1
-
-    for s3_file in bucket.objects.filter(Prefix='Extracted_Data/'):
-        if (table in s3_file.key) and (s3_file.key.endswith(".gz") or s3_file.key.endswith(".inp") or s3_file.key.endswith(".txt") or ("%srow"%(tablename) in s3_file.key)):
-            file_path = "%s%s%s"%(reload_file_location,path_sep,s3_file.key)
-            object_size = s3_file.size
-            if os.path.exists(file_path):
-                file_size = os.stat(file_path).st_size
-            else:
-                logging.info("Table %s data copy failed on AWS S3 bucket"%(table))
-                upload_success = False
-            if object_size == file_size:
-                object_count += 1
-
-    logging.info("%s"%newline)
-    if (file_count == object_count) and (file_count or object_count):
-       logging.info("Table %s copied successfully on AWS S3 bucket"%(table))
-       upload_success = True
-    else:
-       files_not_uploaded = file_count - object_count
-       logging.info("Table %s data copy failed on AWS S3 bucket"%(table))
-       logging.info("File count mismatch. %s%s files not yet copied from %s to AWS S3 bucket"%(newline,files_not_uploaded,table_path))
+       files_not_uploaded = file_count - hdlfs_count
+       logging.info("%s"%(common.dividerline))
+       logging.info("Table %s data copy failed on data lake Files"%(tableid))
+       logging.info("File count mismatch. \n%s files not yet copied from %s to data lake Files"%(files_not_uploaded,table_path))
        upload_success = False
 
     return upload_success
@@ -429,9 +424,9 @@ def load_table(host_name, table, tableid, already_processed, expected_rowcount):
     is_loaded_successfully=False
     status="FAIL"
 
-    log_file="%s%sHDL_Conn_Logs%s%s_load.log"%(reload_file_location,path_sep,path_sep,tableid)
+    err_file="%s%sHDL_Conn_Logs%s%s_load.err"%(reload_file_location,path_sep,path_sep,tableid)
     conn_log_file="%s%sHDL_Conn_Logs%s%s_load_conn.log"%(reload_file_location,path_sep,path_sep,tableid)
-    out_file="%s_out"%(tableid)
+    out_file="%s%sHDL_Conn_Logs%s%s_out"%(reload_file_location,path_sep,path_sep,tableid)
     sql_file="%s%sExtracted_Data%s%s%s%s.sql"%(reload_file_location,path_sep,path_sep,tableid,path_sep,tableid)
 
     if owner.lower() == "dba":
@@ -448,7 +443,7 @@ def load_table(host_name, table, tableid, already_processed, expected_rowcount):
     if is_loaded_successfully:
         status="OK"
     else:
-        command="""dbisql  -nogui  -c 'uid=%s;pwd=%s;host=%s;ENC=tls(fips=NO;tls_type=rsa;skip_certificate_name_check=1; direct=yes;);log=%s' READ ENCODING "'%s'" %s -onerror exit >%s 2>>%s"""%(common.user, common.password, host_name,conn_log_file,common.charset,sql_file,out_file,log_file)
+        command="""dbisql  -nogui  -c 'uid=%s;pwd=%s;host=%s;ENC=tls(fips=NO;tls_type=rsa;skip_certificate_name_check=1; direct=yes;);log=%s' READ ENCODING "'%s'" %s -onerror exit >%s 2>>%s"""%(common.user, common.password, host_name,conn_log_file,common.charset,sql_file,out_file,err_file)
         output=subprocess.call(['powershell','-command',command ])
 
         f=codecs.open(out_file,'r', 'utf-16')
@@ -456,7 +451,7 @@ def load_table(host_name, table, tableid, already_processed, expected_rowcount):
         f.close()
         for line in lines:
             if "Error: For table" in line:
-                with codecs.open(log_file, "a+", common.charset) as f:
+                with codecs.open(err_file, "a+", common.charset) as f:
                     f.write(line + newline)
                 f.close()
                 row_missmatch=1
@@ -472,51 +467,58 @@ def load_table(host_name, table, tableid, already_processed, expected_rowcount):
     if os.path.exists(out_file):
         os.remove(out_file)
 
+    # Remove err_file if the table was loaded successfully
+    if is_loaded_successfully and os.path.exists(err_file):
+        os.remove(err_file)
+
     return status,row_count
 
 #Function to track status of tables loaded successfuly
-def updateLoadStatus(qSuccess,total_table,tables_count,fail_count):
-    with codecs.open(HDLLoad_out, "a",common.charset) as f:
-        while True:
-            try:
-                tableName,tableid,load_rowcount= qSuccess.get_nowait()
-                f.write("%s,%s,%s%s"%(tableName,tableid,load_rowcount,newline))
-                logging.info( "Adding entry in %s file %sfor table : %s [tableID:%s]"%(HDLLoad_out,newline,tableName,tableid))
-                tables_count.value = tables_count.value + 1
-                progressBar(tables_count,fail_count,total_table)
-                if total_table.value == tables_count.value + fail_count.value:
+def updateLoadStatus(qSuccess,total_table,tables_count,fail_count,file_write_lock):
+    with file_write_lock:
+        with codecs.open(HDLLoad_out, "a",common.charset) as f:
+            while True:
+                try:
+                    tableName,tableid,load_rowcount= qSuccess.get_nowait()
+                    f.write("%s,%s,%s%s"%(tableName,tableid,load_rowcount,newline))
+                    logging.info( "Adding entry in %s file %sfor table : %s [tableID:%s]"%(HDLLoad_out,newline,tableName,tableid))
+                    f.flush()
+                    tables_count.value = tables_count.value + 1
+                    progressBar(tables_count,fail_count,total_table)
+                    if total_table.value == tables_count.value + fail_count.value:
+                        break
+                except Exception as exp:
                     break
-            except Exception as exp:
-                break
-    f.close()
+        f.close()
 
 #Function to track status of tables failed to load
-def updateFailureStatus(qFail,total_table,tables_count,fail_count):
-    with codecs.open(loadFailure_err, "a+", common.charset) as f:
-        while True:
-            try:
-                tableName,tableid,exp= qFail.get_nowait()
-                if not tableName in f.read():
-                    if exp:
-                        f.write( "%s,%s:%s%s"%(tableName,tableid,str(exp),newline))
-                    else:
-                        f.write( "%s,%s%s"%(tableName,tableid,newline))
-                logging.info("Adding entry in %s file %sfor table : %s [tableID:%s] "%(loadFailure_err,newline,tableName,tableid))
-                fail_count.value = fail_count.value + 1
-                progressBar(tables_count,fail_count,total_table)
-                if total_table.value == tables_count.value + fail_count.value:
+def updateFailureStatus(qFail,total_table,tables_count,fail_count,file_write_lock):
+    with file_write_lock:
+        with codecs.open(loadFailure_err, "a+", common.charset) as f:
+            while True:
+                try:
+                    tableName,tableid,exp= qFail.get_nowait()
+                    if not tableName in f.read():
+                        if exp:
+                            f.write( "%s,%s:%s%s"%(tableName,tableid,str(exp),newline))
+                        else:
+                            f.write( "%s,%s%s"%(tableName,tableid,newline))
+                    logging.info("Adding entry in %s file %sfor table : %s [tableID:%s] "%(loadFailure_err,newline,tableName,tableid))
+                    f.flush()
+                    fail_count.value = fail_count.value + 1
+                    progressBar(tables_count,fail_count,total_table)
+                    if total_table.value == tables_count.value + fail_count.value:
+                        break
+                except Exception as exp:
                     break
-
-            except Exception as exp:
-                break
-    f.close()
+        f.close()
 
 # Function to load data for tables in multiprocessing queue by host from hostname list
 # I/P parameters:
 # q1 = multiprocessing queue of tables to be loaded
 # hostname = Host by which tables will be loaded
 # already_processed = flag indicating already processed tables for load
-def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,tables_count,fail_count):
+def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,tables_count,fail_count,file_write_lock):
     if log_q:
         qh = QueueHandler(log_q)
         logger = logging.getLogger()
@@ -530,16 +532,10 @@ def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,
             tableid = table_with_tid[1]
             host_name = hostname[0]
             expected_rowcount = table_with_tid[2]
-            if common.object_store.lower() == 'azure':
-                if common.Object_Store_Copy_Validation.lower() == 'yes':
-                    upload_success = validate_upload_azure(tableid)
-                else:
-                    upload_success = True
+            if common.Object_Store_Copy_Validation.lower() == 'yes':
+                upload_success = validate_upload_hdlfs(tableid)
             else:
-                if common.Object_Store_Copy_Validation.lower() == 'yes':
-                    upload_success = validate_upload_aws(tableid)
-                else:
-                    upload_success = True
+                upload_success = True
 
             if(upload_success):
                 strt = datetime.datetime.now()
@@ -581,7 +577,7 @@ def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,
                     logging.info(log_str)
 
                     qSuccess.put((tableName,tableid,load_rowcount))
-                    updateLoadStatus(qSuccess,total_table,tables_count,fail_count)
+                    updateLoadStatus(qSuccess,total_table,tables_count,fail_count,file_write_lock)
 
                     elap_sec = common.elap_time(strt)
                     days, hours, minutes, seconds = common.calculate_time(elap_sec)
@@ -595,7 +591,7 @@ def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,
                     logging.info("%s"%(common.dividerline))
 
                     qFail.put((tableName,tableid,None))
-                    updateFailureStatus(qFail,total_table,tables_count,fail_count)
+                    updateFailureStatus(qFail,total_table,tables_count,fail_count,file_write_lock)
 
                     logging.info("%s"%newline)
 
@@ -603,14 +599,14 @@ def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,
             if str(exp) != "":
                 logging.error("Unexpected error reported while loading data: %s"%(str(exp)))
                 qFail.put((tableName,tableid,exp))
-                updateFailureStatus(qFail,total_table,tables_count,fail_count)
+                updateFailureStatus(qFail,total_table,tables_count,fail_count,file_write_lock)
                 logging.info("%s"%newline)
             else:
                 return
 
 
 # Function to form host names for each connection based on
-# value of coord_conn_num and writer_conn_num provided in json config file
+# value of coord_conn_num and worker_conn_num provided in json config file
 def hosts_list(conn_num,hostname,servertype):
     for i in range(conn_num):
         host_list.append((hostname,servertype))
@@ -758,18 +754,27 @@ def loaded_tables_count(f):
 
         table_cnt = len(l1)
 
+    str1 = "Total number of loaded tables = %s"%(table_cnt)
+    common.print_and_log(str1)
+
 # Function to display loading progress
 def progressBar(current,fail_count,total_table):
     if (((current.value + fail_count.value )% 20) == 0) or ((current.value + fail_count.value )== total_table.value):
         print("%s tables successfully loaded and %s tables failed out of total %s tables."%(current.value,fail_count.value,total_table.value))
         print("%s%s"%(newline,common.dividerline))
 
+# Function which display the CLI command to delete copied data from HDLFS object store
+def display_clidelete_command():
+    delete_cmd = "hdlfscli -cert %s -key %s -s %s delete -f /%s"%(common.hdlfs_cert_path, common.hdlfs_key_path, common.hdlfs_files_endpoint, common.hdlfs_directory)
+    logging.info("%s"%(common.double_divider_line))
+    logging.info("Next Steps:%s%s1. Delete data from Object store."%(newline,newline))
+    logging.info("%sSample command to delete the data on data lake Files object store:%s%s "%(newline,newline,delete_cmd))
+
 # Function to check the status of migration
 # It will compare the IQ table list with the list of loaded tables
 # If both list are equal then extraction of all tables done successfully
 def check_migration_status(f1,f2):
     extracted_table_list = list()
-    foreign_table_list = list()
     iq_table_list = list()
     with codecs.open(f1, "r", common.charset) as f:
         for line in f.readlines():
@@ -782,13 +787,10 @@ def check_migration_status(f1,f2):
                 splitdot = splits[0].split('.')
                 extracted_table_list.append((splits[0]))
                 iq_table_list.append(splits[0])
-                if splits[3] == 'FOREIGN':
-                    foreign_table_list.append(splits[0])
 
     if not os.path.isfile(f2):
-        logging.info("%s"%(common.double_divider_line))
-        logging.info("%s file does not exist. %sLoading of all tables failed."%(f2,newline))
-        logging.info("%s"%(common.double_divider_line))
+        str1 = "%s file does not exist. %sLoading of all tables failed."%(f2,newline)
+        common.print_and_log(str1)
 
     else:
         loaded_table_list = list()
@@ -807,33 +809,16 @@ def check_migration_status(f1,f2):
         failed_list = [item for item in extracted_table_list  if item not in loaded_table_list]
 
         if len(failed_list) == 0:
-            logging.info("%s"%(common.double_divider_line))
-            logging.info("Loading of all tables is successful.")
-            logging.info("%s"%(common.double_divider_line))
+            str1 = "Loading of all tables is successful."
+            common.print_and_log(str1)
+            display_clidelete_command()
         else:
             fail = len(failed_list)
-            logging.info("%s"%(common.double_divider_line))
-            logging.info("Loading of %s tables failed."%fail)
+            str1 = "Total number of tables which are failed to load = %s"%(fail)
+            common.print_and_log(str1)
             logging.info("Please check %s file for loading failures. %sRerun Load Utility to load remaining tables."%(loadFailure_err,newline))
             logging.info("%s"%(common.double_divider_line))
 
-    if len(foreign_table_list) != 0:
-        flag = 0
-        # condition to check that all foreign key constraint tables have been loaded
-
-        if((set(foreign_table_list) & set(iq_table_list))== set(foreign_table_list)) :
-            flag = 1
-
-        if flag == 1:
-            foreign_strt = datetime.datetime.now()
-            load_schema_or_foreignkey(0,1)
-            foreign_elaptime = common.elap_time(foreign_strt)
-            days, hours, minutes, seconds = common.calculate_time(foreign_elaptime)
-            str1 = "Time taken in Foreign key constraints load on data lake IQ : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0])
-            common.print_and_log(str1)
-        else:
-            str1 = "As there are table load errors, foreign key constraints have not been loaded in data lake IQ. %sAnalyze and fix the errors and re-run the load utility."%newline
-            common.print_and_log(str1)
 
 # Function which will do parallel load and load table data
 def load_main():
@@ -844,12 +829,12 @@ def load_main():
 
     start = datetime.datetime.now()
     hosts_list(common.coord_conn_num,common.coord_host,'Coordinator')
-    hosts_list(common.writer_conn_num,common.writer_host,'Writer')
+    hosts_list(common.worker_conn_num,common.worker_host,'Worker')
 
-    str1 = "Data load on Hana Datalake IQ started."
+    str1 = "Data load on data lake Relational Engine started."
     common.print_and_log(str1)
     print("%s"%(common.dividerline))
-    print("Data Loading on Hana Datalake IQ is in progress.%sFor details of tables loaded on Hana Datalake IQ successfully, Please check file: %s%s"%(newline,newline,HDLLoad_out))
+    print("Data Loading on data lake Relational Engine is in progress.%sFor details of tables loaded on data lake Relational Engine successfully, Please check file: %s%s"%(newline,newline,HDLLoad_out))
 
     print("%s%s"%(newline,common.dividerline))
     print("For Load progress, Please check file: %s%s"%(newline,load_schema_and_data_log))
@@ -859,7 +844,7 @@ def load_main():
     failed_table_q = multiprocessing.Queue()
     qSuccess = multiprocessing.Queue()
     qFail = multiprocessing.Queue()
-
+    file_write_lock = multiprocessing.Lock()
 
     if(resume_mode):
         failed_table_q,load_table_q = recover_table_list()
@@ -870,7 +855,7 @@ def load_main():
 
     #Start failed table processing
     for i in range(len(host_list)):
-        p = multiprocessing.Process(target=load_single, args=(failed_table_q,host_list[i],True,total_table,log_q,qSuccess,qFail,tables_count,fail_count))
+        p = multiprocessing.Process(target=load_single, args=(failed_table_q,host_list[i],True,total_table,log_q,qSuccess,qFail,tables_count,fail_count,file_write_lock))
         process.append(p)
         p.start()
     for p in process:
@@ -882,7 +867,7 @@ def load_main():
 
     #Start processing of tables which are yet to process
     for i in range(len(host_list)):
-        p = multiprocessing.Process(target=load_single, args=(load_table_q,host_list[i],False,total_table,log_q,qSuccess,qFail,tables_count,fail_count))
+        p = multiprocessing.Process(target=load_single, args=(load_table_q,host_list[i],False,total_table,log_q,qSuccess,qFail,tables_count,fail_count,file_write_lock))
         process.append(p)
         p.start()
     for p in process:
@@ -891,13 +876,11 @@ def load_main():
     total_elap_sec = common.elap_time(start)
     days, hours, minutes, seconds = common.calculate_time(total_elap_sec)
 
-    logging.info("Data load on Hana Datalake IQ completed. ")
+    str1 = "Data load on data lake Relational Engine completed. "
+    common.print_and_log(str1)
+    str1 = "Total Data Load Time : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0])
+    common.print_and_log(str1)
     loaded_tables_count(HDLLoad_out)
-    logging.info("Total number of loaded tables = %s"%table_cnt)
-    logging.info("Total number of tables which are failed to load = %s"%fail_count.value)
-    logging.info("%s"%(common.dividerline))
-    logging.info("Total Data Load Time : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0]))
-    logging.info("%s"%(common.dividerline))
     check_migration_status(extractedTables_out, HDLLoad_out)
 
 if __name__ == '__main__':
@@ -906,33 +889,81 @@ if __name__ == '__main__':
     global resume_mode
     resume_mode = False
     get_inputs(config_file)
-    validate_dir_and_files()
-    if check_schema_load_required():
-        strt = datetime.datetime.now()
-        str1 = "%sDo you want to %sR - Restart schema load%sS - Skip schema load in resume mode? (R/S): "%(newline,newline,newline)
-        if resume_mode:
-            if(sys.version[0:2] == '2.'):
-                val = str(raw_input(str1))
-            else:
-                val = str(input(str1))
-            if val.lower() == 'r':
-                load_schema_or_foreignkey(1,0)
-            elif val.lower() != 's':
-                sys.exit("Enter correct input value. Supported values are R(Restart) and S(Skip)")
-        else:
-            load_schema_or_foreignkey(1,0)
-        elaptime = common.elap_time(strt)
-        days, hours, minutes, seconds = common.calculate_time(elaptime)
-        str1 = "Time taken in Schema Load : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0])
-        common.print_and_log(str1)
-    if len(extractedTables_out) == 0 or not os.path.isfile(extractedTables_out):
-        logging.info("%s"%(common.double_divider_line))
-        logging.info("The Database has no IQ tables. No need of Loading.")
-        logging.info("%s"%(common.double_divider_line))
-    else:
-        load_main()
+    if onlyschema == 'y':
+        # Only schema load mode
+        validate_dir_and_files_onlyschema()
 
-    print("Loading of Schema and Data on Hana Datalake IQ completed.%sPlease check file for details :%s%s"%(newline,newline,load_schema_and_data_log))
+        # Loop 1: Schema Load
+        if check_schema_load_required():
+            strt = datetime.datetime.now()
+            str1 = "%sDo you want to %sR - Restart schema load%sS - Skip schema load in resume mode? (R/S): " % (newline, newline, newline)
+            if resume_mode:
+                if(sys.version[0:2] == '2.'):
+                    val = str(raw_input(str1))
+                else:
+                    val = str(input(str1))
+                if val.lower() == 'r':
+                    load_schema(1)
+                elif val.lower() != 's':
+                    sys.exit("Enter correct input value. Supported values are R (Restart) and S (Skip)")
+            else:
+                load_schema(1)
+            elaptime = common.elap_time(strt)
+            days, hours, minutes, seconds = common.calculate_time(elaptime)
+            str1 = "Time taken in Schema Load : %s%d days, %d hours, %d minutes and %d seconds" % (newline, days[0], hours[0], minutes[0], seconds[0])
+            common.print_and_log(str1)
+
+    elif onlydata == 'y':
+        # Only data load mode
+        confirmation = input("Have you already completed the schema load? (yes/no): ").strip().lower()
+        if confirmation != 'yes':
+            sys.exit("Error: Please load schema first before running data-only mode.")
+
+        validate_dir_and_files()
+
+        # Loop 2: Data Load
+        if len(extractedTables_out) == 0 or not os.path.isfile(extractedTables_out):
+            logging.info("%s" % (common.double_divider_line))
+            logging.info("The Database has no IQ tables. No need of Loading.")
+            logging.info("%s" % (common.double_divider_line))
+        else:
+            load_main()
+
+    elif fullload == 'y':
+        # Full load mode - schema + data
+        validate_dir_and_files()
+
+        # Loop 1: Schema Load
+        if check_schema_load_required():
+            strt = datetime.datetime.now()
+            str1 = "%sDo you want to %sR - Restart schema load%sS - Skip schema load in resume mode? (R/S): " % (newline, newline, newline)
+            if resume_mode:
+                if(sys.version[0:2] == '2.'):
+                    val = str(raw_input(str1))
+                else:
+                    val = str(input(str1))
+                if val.lower() == 'r':
+                    load_schema(1)
+                elif val.lower() != 's':
+                    sys.exit("Enter correct input value. Supported values are R (Restart) and S (Skip)")
+            else:
+                load_schema(1)
+            elaptime = common.elap_time(strt)
+            days, hours, minutes, seconds = common.calculate_time(elaptime)
+            str1 = "Time taken in Schema Load : %s%d days, %d hours, %d minutes and %d seconds" % (newline, days[0], hours[0], minutes[0], seconds[0])
+            common.print_and_log(str1)
+
+        # Loop 2: Data Load
+        if len(extractedTables_out) == 0 or not os.path.isfile(extractedTables_out):
+            logging.info("%s" % (common.double_divider_line))
+            logging.info("The Database has no IQ tables. No need of Loading.")
+            logging.info("%s" % (common.double_divider_line))
+        else:
+            load_main()
+
+    print("%s"%(common.dividerline))
+    logging.info("%s"%(common.dividerline))
+    print("Load Utility completed.%sPlease check file for details :%s%s"%(newline,newline,load_schema_and_data_log))
     total_elaptime = common.elap_time(total_strt)
     days, hours, minutes, seconds = common.calculate_time(total_elaptime)
     string = "Total Time taken in load utility : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0])
