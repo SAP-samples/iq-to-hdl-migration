@@ -60,20 +60,21 @@ It will have following files:
 
 - migration.py: Migration utility to extract schema and data from SAP IQ.
  
-
 ## Requirements
-- Python 3 (3.9 or higher version)
+- Python 3 (3.10.x or higher version)
 - Pyodbc
+- Minimum Supported IQ Server version - 16.1_SP01
+- Paramiko(Python module)
 
 ## Download and Installation
-Install python 3.9 or higher version and pyodbc. 
+Install python 3.10.x or higher version and pyodbc. 
 Clone this repo
 You can then run Pre_Migration and Migration utilities.
 
 ## Known Issues
 
 ## Limitations
-These utilities have been verified for migration to SAP Hana Clould, Data Lake in AWS and Azure Hyperscalers but not in GCP or any other supported Hyperscaler.
+These utilities have been verified for migration to SAP Hana Clould, Data Lake via data lake Files only.
 
 ## How to obtain support
 [Create an issue](https://github.com/SAP-samples/iq-to-hdl-migration/issues) in this repository if you find a bug or have questions about the content.
