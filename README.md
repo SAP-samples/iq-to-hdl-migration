@@ -48,7 +48,7 @@ It will have following files:
   
 - Migration_README.md: Readme file for Migration utility. Please refer to this README file to run migration utility.
 
-- copy_data_to_hdlfs.sh: Shell script to used by copy_hdlfs.py with necessary parameters and environment setup.
+- copy_data_to_hdlfs.sh: Shell script to be used by copy_hdlfs.py with necessary parameters and environment setup.
 
 - copy_hdlfs.py: Python utility to recursively copy extracted data files from local storage to HDLFS using REST APIs.
 
