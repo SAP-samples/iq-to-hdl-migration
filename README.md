@@ -2,16 +2,16 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/SAP-samples/iq-to-hdl-migration)](https://api.reuse.software/info/github.com/SAP-samples/iq-to-hdl-migration)
 
 ## Description
-This is a utility for SAP IQ to SAP HANA Cloud, Data Lake migration. These sample utilities can be used to migrate existing schema and data of SAP IQ to SAP HANA Cloud Data Lake.
-These utilities have been verified for migration to SAP Hana Clould, Data Lake via data lake Files only. 
+This is a utility for SAP IQ to SAP HANA Cloud, Data Lake migration. These sample utilities can be used to migrate existing schema and data of SAP IQ to SAP HANA Cloud data lake Relational Engine.
+These utilities have been verified for migration to SAP HANA Cloud data lake Relational Engine via data lake Files only. 
 It has 3 different utilities.
 
-1. Pre-Migration utility - The pre-migration utility identifies incompatible features, artifacts, server options, users etc. in your existing on-premise SAP IQ database before migrating it to SAP HANA Cloud, Data Lake.
+1. Premigration utility - The premigration utility identifies incompatible features, artifacts, server options, users etc. in your existing on-premise SAP IQ database before migrating it to SAP HANA Cloud data lake Relational Engine.
 
 2. Migration Utility - The migration utility has three scripts:
 - migration.py: Extracts SAP IQ schema and data to a specified local location.
 - copy_hdlfs.py: Copies the extracted data files from local disk to the target SAP HANA Cloud, Data Lake File Store (HDLFS).
-- load_schema_and_data.py: Loads the schema and copied data into SAP HANA Cloud data lake Relational Engine .
+- load_schema_and_data.py: Loads the schema and copied data into SAP HANA Cloud data lake Relational Engine.
   
 For more information on these utilities, please refer to README files within the  respective Premigration and Migration folders.
 
@@ -32,13 +32,13 @@ It will have following files:
 
 - migration_config.json: Configuration options file to provide the options required to run the migration utility.
 
-- premigration_config.json: Configuration options file to provide the options required to run the pre-migration utility.
+- premigration_config.json: Configuration options file to provide the options required to run the premigration utility.
 
-2. **PreMigration Folder**
+2. **Pre_Migration Folder**
 
 It will have following files:
 
-- PreMigration_README.md: README file for the Premigration utility. Please refer to the SAP HANA Cloud, Data Lake Migration Guide of assistance on running the utility.
+- PreMigration_README.md: README file for the premigration utility. Please refer to the SAP HANA Cloud, Data Lake Migration Guide of assistance on running the utility.
   
 - pre_migration.py: Used by the premigration utility to identify different login policy-related options that are not supported in data lake Relational Engine.
 
@@ -55,9 +55,9 @@ It will have following files:
 
 - load_schema.sh: Shell script used by the load_schema_and_data.py utility to load the database schema into data lake Relational Engine.
 
-- load_schema_and_data.py: Python utility to load the SAP IQ extracted schema and data into the data lake Relational Engine..
+- load_schema_and_data.py: Python utility to load the SAP IQ extracted schema and data into the data lake Relational Engine.
 
-- load_table.sh: Shell script used by the load_schema_and_data.py utility to load table data into data lake Relational Engine..
+- load_table.sh: Shell script used by the load_schema_and_data.py utility to load table data into data lake Relational Engine.
 
 - migration.py: Python utility to extract schema and data from SAP IQ.
  
@@ -70,7 +70,7 @@ It will have following files:
 ## Download and Installation
 Install python 3.10.x or higher version and pyodbc. 
 Clone this repo
-You can then run PreMigration and Migration utilities.
+You can then run Premigration and Migration utilities.
 
 ## Known Issues
 
