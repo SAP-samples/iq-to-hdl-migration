@@ -2592,7 +2592,12 @@ def display_clicopy_command(batch):
     logging.info("%s"%(common.double_divider_line))
     logging.info("Next Steps:%s%s1. Copy data on Object store."%(newline,newline))
     logging.info("%sSample command to copy the data on data lake Files object store:"%(newline))
-    logging.info("%spython3 copy_hdlfs.py --config_file <migration config file path>"%newline) 
+    if is_windows:
+        copy_cmd = "hdlfscli -cert %s -key %s -s %s upload %s /%s -log"%(common.hdlfs_cert_path, common.hdlfs_key_path, common.hdlfs_files_endpoint, migrationpath, common.hdlfs_directory)
+        logging.info("%s%s "%(newline,copy_cmd))
+        logging.info("NOTE: Due to a known HDLFS limitation, the hdlfscli utility does not support copying data file larger than 95 GB. At present, no official workaround exists but an alternate solution is in progress.")
+    else:
+        logging.info("%spython3 copy_hdlfs.py --config_file <migration config file path>"%newline)
     logging.info("%s"%(common.double_divider_line))
     batches_count = count_batches_generated_failed()
     if batch == 0 or batch == batches_count:
