@@ -1,7 +1,7 @@
 ### Overview
 The migration process involves two main operations:
    - The unloading of schema and data to a shared location in the on-premise SAP IQ environment. This operation is performed by the `migration.py` utility.
-   - Copy to HDLFS object store.
+   - Copy to HDLFS object .
 
 #### Assumption
 - Provision of data lake Relational Engine Instance is complete
