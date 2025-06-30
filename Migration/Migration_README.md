@@ -134,7 +134,9 @@ If Batchwise extraction is enabled, then tables are extracted in multiple batche
 - You can monitor the progress of migration by checking (or tail) `<utility_scripts_dir>/iq-to-hdl-migration/Migration/migration.log` file.
 - Incase of any extraction failures in `extractFailure.err`, you should rerun `migration.py` in resume mode
 
-#### Copy the `<Extract_Path>/Migration_Data` folder to the data lake Files Object Store. This can be accomplished by using copy script i.e. copy_hdlfs.py.
+#### Copy the `<Extract_Path>/Migration_Data` folder to the data lake Files Object Store. This can be accomplished by using either commands based on corresponding OS:
+
+1. For Linux OS Migration, use copy script i.e. copy_hdlfs.py.
 
 EXAMPLES:
 ```
@@ -143,7 +145,26 @@ python3 copy_hdlfs.py --config_file <config_file_path>
 OR
 python3 copy_hdlfs.py -f <config_file_path>
 ```
+
 **_NOTE:_**
 - config_file_path for copy_hdlfs.py is same config file used for migration.
 - You can review `<utility_scripts_dir>/iq-to-hdl-migration/Migration/upload_log_<timestamp>.log for all logs related to upload of data to the HDLFS object store.
 - You can check `<utility_scripts_dir>/iq-to-hdl-migration/Migration/successful_uploads.log for all files uploaded successfully to the HDLFS object store.
+
+2. For Windows OS Migration, use hdlfscli to copy the data.
+
+EXAMPLES:
+```
+(HDLFS copy command)
+hdlfscli -cert <client.crt path>/client.crt -key <client.key path>/client.key -s <files_endpoint> upload <Extract_Path>/Migration_Data /Migration_Data -log
+```
+**_NOTE:_**
+You can review ~/.hdlfscli.log for any errors related to upload of data to the HDLFS object store.
+**Limitation on Windows OS:**
+- Due to a known HDLFS limitation, the `hdlfscli` utility does not support copying data file larger than 95 GB. At present, no official workaround exists but an alternate solution is in progress.
+Sample Errors:
+```
+INFO: 2025/05/22 01:44:17 Upload /iqSrver1/install/iq-16.1/Migration_Data/Extracted_Data/6316/631625_1.gz failed, err Put "https://a1234567-123b-4567-abcd-abcd123456e9.files.hdl.demohdl.com/webhdfs/v1/Migrationdata/Extracted_Data/6316/631625_1.gz?op=CREATE&data=true": write tcp 10.4.24.151:60514->52.58.155.87:443: write: broken pipe, retrying
+INFO: 2025/05/22 23:20:01 error: Error upload directory /iqSrver1/install/iq-16.1/data/Migration_Data, Payload is too large (response code 413)
+Payload is too large (response code 413)
+```
