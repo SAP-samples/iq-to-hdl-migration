@@ -75,6 +75,8 @@ You can then run Premigration and Migration utilities.
 ## Known Issues
 
 ## Limitations
+Due to a known HDLFS limitation, the `hdlfscli` utility does not support copying data file larger than 95 GB.
+At present, no official workaround exists for windows platform but an alternate solution is in progress which will be fixed in next release.
 
 ## How to obtain support
 [Create an issue](https://github.com/SAP-samples/iq-to-hdl-migration/issues) in this repository if you find a bug or have questions about the content.
