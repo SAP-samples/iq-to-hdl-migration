@@ -15,7 +15,6 @@ import os
 import subprocess
 import csv
 import sys, getopt
-import socket
 import getpass
 import os.path
 import platform
@@ -261,8 +260,6 @@ def get_inputs(config_file):
     if common.w == common.t:
         logging.info("Verifying HDLFS_Configuration")
         logging.info("%s"%(common.dividerline))
-
-    logging.info("Client Hostname: %s , ip-address : %s , full-hostname : %s"%(common.host,common.ipaddress,common.fullhostname))
 
     global connectstr
     connectstr = common.conn_str
@@ -648,7 +645,7 @@ def dbo_user_dependent_objects(conn, dbo_artifact_list):
 
     table_id_list = []
     # Get the tableid and tablename of dbo user tables
-    cursor.execute("select table_id, table_name from SYS.SYSTABLE JOIN SYS.SYSUSER ON user_id = creator WHERE lower(user_name) in ('dbo')  AND table_type = 'BASE' and server_type='IQ';")
+    cursor.execute("select table_id, table_name from SYS.SYSTABLE JOIN SYS.SYSUSER ON user_id = creator WHERE lower(user_name) in ('dbo')  AND table_type = 'BASE' and server_type in('IQ','SA');")
     records = cursor.fetchall()
     for i in records:
         dbo_artifact_list.append((i[1],"COMMENT","CREATE TABLE","dbo"))
@@ -2258,10 +2255,11 @@ def form_select_for_lobbfile(tablename,conn,path_to_copy):
     cmd = "SELECT "
     filelst = []
     for i in column_domain_list:
+        col_name = '\"' + i[0] + '\"'  # manually add double quotes around column name
         if i[1] == 'long varchar' or i[1] == 'long binary':
-            filelst.append( "CASE WHEN " + i[0] + " IS NOT NULL THEN" + "('" + obj_path + "' + '" + tableid + "_" + "row' + " + "string(rowid(\"" + table + "\" )) + '.' + '" + str(i[2]) + "') " + "ELSE NULL END" )
+            filelst.append( "CASE WHEN " + col_name + " IS NOT NULL THEN" + "('" + obj_path + "' + '" + tableid + "_" + "row' + " + "string(rowid(\"" + table + "\" )) + '.' + '" + str(i[2]) + "') " + "ELSE NULL END" )
         else:
-            filelst.append( i[0])
+            filelst.append(col_name)
 
     my_string = " ,".join(filelst)
 
@@ -2286,8 +2284,9 @@ def bfile_select_stmt(tablename,conn,path_to_copy):
     cmd = "SELECT "
     filelst = []
     for i in column_domain_list:
+        col_name = '\"' + i[0] + '\"'  # manually add double quotes around column name
         if i[1] == 'long varchar' or i[1] == 'long binary':
-            filelst.append( "BFILE('" + path_to_copy + "/' + '" + tableid + "_" + "row' + " + "string(rowid(\"" + table + "\" )) + '.' + '" + str(i[2]) + "', " + i[0] + ")")
+            filelst.append( "BFILE('" + path_to_copy + "/' + '" + tableid + "_" + "row' + " + "string(rowid(\"" + table + "\" )) + '.' + '" + str(i[2]) + "', " + col_name + ")")
 
     my_string = " ,".join(filelst)
     command1 = " FROM \"%s\".\"%s\""%(owner,table)
@@ -2340,14 +2339,15 @@ def form_load_table_bfilesequential(tablename, conn, path_to_copy,parl):
         command2 = ""
         filelst = []
         for i in l:
+            col_name = '\"' + i[0] + '\"'  # manually add double quotes
             if i[1] == 'long varchar' :
-                filelst.append( i[0] + " ASCII FILE (',') NULL('NULL')")
+                filelst.append( col_name + " ASCII FILE (',') NULL('NULL')")
             elif i[1] == 'long binary':
-                filelst.append( i[0] + " BINARY FILE (',') NULL('NULL')")
+                filelst.append( col_name + " BINARY FILE (',') NULL('NULL')")
             elif i[2] == 'Y':
-                filelst.append( i[0] + " NULL('NULL')")
+                filelst.append( col_name + " NULL('NULL')")
             else:
-                filelst.append( i[0] )
+                filelst.append( col_name )
 
         command2 = ','.join(map(str, filelst))
         command = " " + command1 + "( " + command2 + " )"
@@ -2592,12 +2592,7 @@ def display_clicopy_command(batch):
     logging.info("%s"%(common.double_divider_line))
     logging.info("Next Steps:%s%s1. Copy data on Object store."%(newline,newline))
     logging.info("%sSample command to copy the data on data lake Files object store:"%(newline))
-    if is_windows:
-        copy_cmd = "hdlfscli -cert %s -key %s -s %s upload %s /%s -log"%(common.hdlfs_cert_path, common.hdlfs_key_path, common.hdlfs_files_endpoint, migrationpath, common.hdlfs_directory)
-        logging.info("%s%s "%(newline,copy_cmd))
-        logging.info("NOTE: Due to a known HDLFS limitation, the hdlfscli utility does not support copying data file larger than 95 GB. At present, no official workaround exists but an alternate solution is in progress.")
-    else:
-        logging.info("%spython3 copy_hdlfs.py --config_file <migration config file path>"%newline)
+    logging.info("%spython3 copy_hdlfs.py --config_file <migration config file path>"%newline)
     logging.info("%s"%(common.double_divider_line))
     batches_count = count_batches_generated_failed()
     if batch == 0 or batch == batches_count:
