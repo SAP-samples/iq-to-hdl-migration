@@ -10,7 +10,7 @@
 import getpass
 import platform
 import time
-import os,re,socket
+import os,re
 import logging
 import json
 import sys,getopt
@@ -136,13 +136,6 @@ def get_inputs(config_file,util):
         sybase_path = data['IQ_Server_Install_Path']
         if sybase_path.startswith('<Path'):
             sys.exit("Error: IQ_Server_Install_Path needs to be set in %s file"%config_file)
-
-    global host
-    global ipaddress
-    global fullhostname
-    host = socket.gethostname()
-    ipaddress = socket.gethostbyname(host)
-    fullhostname = socket.getfqdn(ipaddress)
 
 def object_store_hdlfs(config_file):
 
@@ -345,6 +338,9 @@ def mig_inputs(config_file,util):
     if charset == "Extended_UNIX_Code_Packed_Format_for_Japanese":
         logging.info("Warning: Python doesn't support charset %s.%sSwitching to charset EUC-JP."%(charset,newline))
         charset = "EUC-JP"
+    if charset == "CESU-8":
+        logging.info("Warning: Python doesn't support charset %s.%sSwitching to charset UTF-8."%(charset,newline))
+        charset = "UTF-8"
 
     cursor.close()
     conn.close()
