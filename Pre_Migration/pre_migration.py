@@ -11,7 +11,7 @@ import pyodbc
 import getpass
 import time
 import datetime
-import os,re,socket
+import os,re
 import csv
 import logging
 import json
@@ -68,8 +68,6 @@ def get_inputs(config_file):
     common.host_validation(config_file,'pre_migration')
     common.premig_inputs(config_file,'pre_migration')
     log_file.info("IQ Server Hostname : %s\n"%(common.hostname))
-    log_file.info("Client Hostname : %s , ip-address : %s , full-hostname : %s\n"%(common.host,common.ipaddress,common.fullhostname))
-
     log_file.info("Python version: %s\n"%sys.version)
     global conn
     conn = common.conn
@@ -201,6 +199,12 @@ def dbproperties_verify(conn):
     cursor.execute("select db_property('Collation');")
     collation = cursor.fetchone()[0]
     output_logging('DB CHAR COLLATION','%s'%(collation))
+
+    # Check for unsupported collations
+    unsupported_collations = ['EUC_TAIWAN']
+    if collation.upper() in unsupported_collations:
+        print(f"\nThis collation '{collation}' is not supported in SAP HANA Cloud, Data Lake Relational Engine.")
+        sys.exit(1) 
 
     # CaseSensitivity check
     cursor.execute("select CASE DB_PROPERTY('caseSensitive') WHEN 'Off' THEN 'ignore' WHEN 'On' THEN 'respect' ELSE '' END")
@@ -443,6 +447,22 @@ def sa_tables_verify(conn):
 
     elap_sec = common.elap_time(strt)
     log_file.info("\nVerification of SQL Anywhere tables completed in %s seconds"%(elap_sec))
+
+# Tables owned by dbo
+def dbo_basetables_verify(conn):
+    strt = datetime.datetime.now()
+    log_file.info("\n%s"%(common.dividerline))
+    log_file.info("\nVerification of DBO owned tables started.")
+
+    cursor = conn.cursor()
+    cursor.execute("select count(*) from SYS.SYSTABLE JOIN SYS.SYSUSER ON user_id = creator WHERE lower(user_name) in ('dbo')  AND table_type = 'BASE' and server_type in('IQ','SA')")
+    count = cursor.fetchone()[0]
+    if count != 0:
+        action_required_list.append(('DBO_Tables', f'DBO Owned Tables not supported in SAP HANA Cloud, Data Lake Relational Engine.'))
+    cursor.close()
+
+    elap_sec = common.elap_time(strt)
+    log_file.info("\nVerification of DBO owned tables completed in %s seconds"%(elap_sec))
 
 # LD INDEXES
 def ldindex_verify(conn):
@@ -875,6 +895,7 @@ def feature_properties(conn):
     webservice_verify(conn)
     verify_readers_present(conn)
     verify_startup_options(conn)
+    dbo_basetables_verify(conn)
     print("Verifying Incompatible features and properties")
     strt = datetime.datetime.now()
     log_file.info("\n%s"%(common.dividerline))
