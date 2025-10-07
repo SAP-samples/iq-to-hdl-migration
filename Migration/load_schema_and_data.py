@@ -8,7 +8,6 @@
 # Copyright (c) 2021 SAP SE or an SAP affiliate company. All rights reserved.
 # ***************************************************************************
 import sys, getopt
-import socket
 import getpass
 import stat
 import os
@@ -279,7 +278,7 @@ def load_schema(schema_flag):
 
     if schema_flag == 1:
         str1 = "Schema load on data lake Relational Engine started."
-        str2 = "Schema load on data lake Relational Engine complete."
+        str2 = "Schema load on data lake Relational Engine completed."
         errmsg = "Error: Schema load failed."
         file1 = "Schema load"
         file2 = "%sAutoUpdated_Reload.sql"%(path_sep)
@@ -497,12 +496,12 @@ def updateFailureStatus(qFail,total_table,tables_count,fail_count,file_write_loc
         with codecs.open(loadFailure_err, "a+", common.charset) as f:
             while True:
                 try:
-                    tableName,tableid,exp= qFail.get_nowait()
+                    tableName,tableid,expected_rowcount,exp= qFail.get_nowait()
                     if not tableName in f.read():
                         if exp:
-                            f.write( "%s,%s:%s%s"%(tableName,tableid,str(exp),newline))
+                            f.write( "%s,%s:%s%s"%(tableName,tableid,expected_rowcount,str(exp),newline))
                         else:
-                            f.write( "%s,%s%s"%(tableName,tableid,newline))
+                            f.write( "%s,%s%s"%(tableName,tableid,expected_rowcount,newline))
                     logging.info("Adding entry in %s file %sfor table : %s [tableID:%s] "%(loadFailure_err,newline,tableName,tableid))
                     f.flush()
                     fail_count.value = fail_count.value + 1
@@ -590,7 +589,7 @@ def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,
                     logging.info("Loading of table :%s [tableID:%s] failed"%(tableName,tableid))
                     logging.info("%s"%(common.dividerline))
 
-                    qFail.put((tableName,tableid,None))
+                    qFail.put((tableName,tableid,expected_rowcount,None))
                     updateFailureStatus(qFail,total_table,tables_count,fail_count,file_write_lock)
 
                     logging.info("%s"%newline)
@@ -598,7 +597,7 @@ def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,
         except Exception as exp:
             if str(exp) != "":
                 logging.error("Unexpected error reported while loading data: %s"%(str(exp)))
-                qFail.put((tableName,tableid,exp))
+                qFail.put((tableName,tableid,expected_rowcount,exp))
                 updateFailureStatus(qFail,total_table,tables_count,fail_count,file_write_lock)
                 logging.info("%s"%newline)
             else:
@@ -660,15 +659,20 @@ def recover_table_list():
                 copied_tables.append(tbl[0].strip())
         extract_file.close()
 
+        # Tables that were extracted but have not yet been successfully loaded
         delta = [item for item in copied_tables  if item not in loaded_tables]
-        delta_in_success = [item for item in delta  if item not in failed_tables]
+        # Failed tables that still need to be retried (not already successfully loaded)
+        actual_failed_tables = [tbl for tbl in failed_tables if tbl not in loaded_tables] 
+        # New tables that were extracted, never failed, and not yet loaded
+        delta_in_success = [item for item in delta if item not in actual_failed_tables] 
         tables_already_loaded = len(loaded_tables)
         total_extracted_table = len(copied_tables)
 
         print("%s"%(common.dividerline))
         print("%s tables out of %s tables already successfully loaded by previous run of load utility."%(tables_already_loaded,total_extracted_table))
 
-        for i in failed_tables:
+        # Queue for previously failed tables (still not loaded)
+        for i in actual_failed_tables:
             total_table.value = total_table.value + 1
             for line in lines:
                 stripped_line = line.strip()
@@ -680,7 +684,8 @@ def recover_table_list():
                     if i == tbl[0].strip():
                         q1.put((i,tbl[2],tbl[1]))
 
-        if (not delta_in_success) and (not failed_tables):
+        # Queue for new tables (delta)
+        if (not delta_in_success) and (not actual_failed_tables):
             logging.info("All extracted tables are already processed for data load")
         else:
             for i in delta_in_success:
@@ -693,11 +698,12 @@ def recover_table_list():
                     len_ext_tbl = len(tbl)
                     if len_ext_tbl == 4:
                         if i == tbl[0].strip() and tbl[1] == 0:
-                            tables_count.value = tables_count.value + 1
-                            with codecs.open(HDLLoad_out, "a", common.charset) as f:
-                                f.write(tbl[0].strip()  + "," + tbl[2].strip() + ",0"  + newline)
-                                logging.info( "Adding entry in %s file %sfor table : %s [tableID:%s]"%(HDLLoad_out,newline,tbl[0].strip(),tbl[2].strip()))
-                            f.close()
+                            if tbl[0].strip() not in loaded_tables:
+                                tables_count.value = tables_count.value + 1
+                                with codecs.open(HDLLoad_out, "a", common.charset) as f:
+                                    f.write(tbl[0].strip()  + "," + tbl[2].strip() + ",0"  + newline)
+                                    logging.info( "Adding entry in %s file %sfor table : %s [tableID:%s]"%(HDLLoad_out,newline,tbl[0].strip(),tbl[2].strip()))
+                                f.close()
                         elif i == tbl[0].strip():
                             q2.put((i,tbl[2],tbl[1]))
     else:
@@ -819,26 +825,24 @@ def check_migration_status(f1,f2):
             logging.info("Please check %s file for loading failures. %sRerun Load Utility to load remaining tables."%(loadFailure_err,newline))
             logging.info("%s"%(common.double_divider_line))
 
-
-# Function which will do parallel load and load table data
 def load_main():
-    global q_listener,log_q,logger
+    global q_listener, log_q, logger
 
     if not is_windows:
         log_q = None
 
     start = datetime.datetime.now()
-    hosts_list(common.coord_conn_num,common.coord_host,'Coordinator')
-    hosts_list(common.worker_conn_num,common.worker_host,'Worker')
+    hosts_list(common.coord_conn_num, common.coord_host, 'Coordinator')
+    hosts_list(common.worker_conn_num, common.worker_host, 'Worker')
 
     str1 = "Data load on data lake Relational Engine started."
     common.print_and_log(str1)
-    print("%s"%(common.dividerline))
-    print("Data Loading on data lake Relational Engine is in progress.%sFor details of tables loaded on data lake Relational Engine successfully, Please check file: %s%s"%(newline,newline,HDLLoad_out))
+    print("%s" % (common.dividerline))
+    print("Data Loading on data lake Relational Engine is in progress.%sFor details of tables loaded on data lake Relational Engine successfully, Please check file: %s%s" % (newline, newline, HDLLoad_out))
 
-    print("%s%s"%(newline,common.dividerline))
-    print("For Load progress, Please check file: %s%s"%(newline,load_schema_and_data_log))
-    print("%s"%(common.dividerline))
+    print("%s%s" % (newline, common.dividerline))
+    print("For Load progress, Please check file: %s%s" % (newline, load_schema_and_data_log))
+    print("%s" % (common.dividerline))
 
     load_table_q = multiprocessing.Queue()
     failed_table_q = multiprocessing.Queue()
@@ -846,28 +850,33 @@ def load_main():
     qFail = multiprocessing.Queue()
     file_write_lock = multiprocessing.Lock()
 
-    if(resume_mode):
-        failed_table_q,load_table_q = recover_table_list()
+    if resume_mode:
+        failed_table_q, load_table_q = recover_table_list()
     else:
         load_table_q = load_table_list()
 
     process = []
 
-    #Start failed table processing
-    for i in range(len(host_list)):
-        p = multiprocessing.Process(target=load_single, args=(failed_table_q,host_list[i],True,total_table,log_q,qSuccess,qFail,tables_count,fail_count,file_write_lock))
-        process.append(p)
-        p.start()
-    for p in process:
-        p.join()
+    # Process failed tables only in resume mode
+    if resume_mode:
+        logging.info(f"Failed table queue size before processing: {failed_table_q.qsize()}")
+        for i in range(len(host_list)):
+            p = multiprocessing.Process(target=load_single, args=(failed_table_q, host_list[i], True, total_table, log_q, qSuccess, qFail, tables_count, fail_count, file_write_lock))
+            process.append(p)
+            p.start()
+        for p in process:
+            p.join()
 
-    #Remove backup file after failed table processing
-    if os.path.isfile(loadFailure_err_bkp):
-        os.remove(loadFailure_err_bkp)
+        # Retry mechanism for failed tables
+        retry_failed_tables(failed_table_q, host_list, total_table, log_q, qSuccess, qFail, tables_count, fail_count, file_write_lock)
 
-    #Start processing of tables which are yet to process
+        # Remove backup file after failed table processing
+        if os.path.isfile(loadFailure_err_bkp):
+            os.remove(loadFailure_err_bkp)
+
+    # Start processing of tables which are yet to process
     for i in range(len(host_list)):
-        p = multiprocessing.Process(target=load_single, args=(load_table_q,host_list[i],False,total_table,log_q,qSuccess,qFail,tables_count,fail_count,file_write_lock))
+        p = multiprocessing.Process(target=load_single, args=(load_table_q, host_list[i], False, total_table, log_q, qSuccess, qFail, tables_count, fail_count, file_write_lock))
         process.append(p)
         p.start()
     for p in process:
@@ -876,12 +885,26 @@ def load_main():
     total_elap_sec = common.elap_time(start)
     days, hours, minutes, seconds = common.calculate_time(total_elap_sec)
 
-    str1 = "Data load on data lake Relational Engine completed. "
+    str1 = "Data load on data lake Relational Engine completed."
     common.print_and_log(str1)
-    str1 = "Total Data Load Time : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0])
+    str1 = "Total Data Load Time : %s%d days, %d hours, %d minutes and %d seconds" % (newline, days[0], hours[0], minutes[0], seconds[0])
     common.print_and_log(str1)
     loaded_tables_count(HDLLoad_out)
     check_migration_status(extractedTables_out, HDLLoad_out)
+
+def retry_failed_tables(failed_table_q, host_list, total_table, log_q, qSuccess, qFail, tables_count, fail_count, file_write_lock):
+    """
+    Retry mechanism for failed tables.
+    """
+    retry_process = []
+    logging.info(f"Retrying failed tables. Queue size: {failed_table_q.qsize()}")
+    for i in range(len(host_list)):
+        p = multiprocessing.Process(target=load_single, args=(failed_table_q, host_list[i], True, total_table, log_q, qSuccess, qFail, tables_count, fail_count, file_write_lock))
+        retry_process.append(p)
+        p.start()
+    for p in retry_process:
+        p.join()
+    logging.info("Retry mechanism for failed tables completed.")
 
 if __name__ == '__main__':
     host_list = []
