@@ -23,5 +23,5 @@
 
 "Batch_Size_GB": "<Optional: Batch size in GB if batch extraction is enabled, else set it to 0 or leave this parameter unchanged to go with normal (non-batch) extraction mode. Provide integer value without quotes>",
 "IQ_Server_Install_Path": "<Path of SAP IQ Server installation directory>",
-"IQ_Version": "<Your major SAP IQ version in use: Should be either SAP IQ 16.0 or 16.1>"
+"IQ_Version": "<Your major SAP IQ version in use: Should be 16.1>"
 }
