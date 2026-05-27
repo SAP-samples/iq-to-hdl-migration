@@ -15,7 +15,6 @@ import os
 import subprocess
 import csv
 import sys, getopt
-import socket
 import getpass
 import os.path
 import platform
@@ -30,8 +29,15 @@ from logging.handlers import QueueHandler, QueueListener
 import fnmatch
 import heapq
 import math
-argv = sys.argv[1:]
-n = len(sys.argv)
+import tempfile
+import atexit
+
+if sys.version_info < (3, 11):
+    sys.exit("Error: Python 3.11 or higher is required. Current version: %s" % sys.version)
+
+# On Windows with multiprocessing 'spawn', child processes re-import this module.
+# Guard argument parsing so child processes don't crash from sys.exit() calls.
+_is_child_process = (multiprocessing.parent_process() is not None)
 
 # Defaults
 config_file = ''
@@ -40,9 +46,22 @@ onlyschema = 'n'
 onlydata = 'n'
 fullextraction = 'n'
 
-# Handle help first
-if '-h' in argv or '--help' in argv:
-    print('''
+if _is_child_process:
+    # Child process (Windows spawn): read config from environment set by parent
+    config_file = os.environ.get('_MIGRATION_CONFIG_FILE', '')
+    dbmode = os.environ.get('_MIGRATION_DBMODE', 'r')
+    onlyschema = os.environ.get('_MIGRATION_ONLYSCHEMA', 'n')
+    onlydata = os.environ.get('_MIGRATION_ONLYDATA', 'n')
+    fullextraction = os.environ.get('_MIGRATION_FULLEXTRACTION', 'n')
+    if not config_file:
+        raise RuntimeError("Child process missing _MIGRATION_CONFIG_FILE env var")
+else:
+    argv = sys.argv[1:]
+    n = len(sys.argv)
+
+    # Handle help first
+    if '-h' in argv or '--help' in argv:
+        print('''
 Usage:
     migration.py --config_file <config file path> [--mode w] [--onlyschema y] [--onlydata y] [--fullextraction y]
 Same as:
@@ -60,51 +79,58 @@ Note:
     One of the three options must be provided and set to 'y'.
     SAP recommends to run coordinator node with -iqro flag while migration process.
         ''')
-    sys.exit()
+        sys.exit()
 
-# Validate for incorrect short forms like -mode, -onlyschema etc.
-for arg in argv:
-    if arg.startswith('-') and not arg.startswith('--'):
-        if arg not in ['-h', '-f', '-m', '-s', '-d', '-e']:
-            print(f"Error: Unsupported or incorrectly formatted option '{arg}'. Use proper short or long options.")
-            sys.exit(2)
+    # Validate for incorrect short forms like -mode, -onlyschema etc.
+    for arg in argv:
+        if arg.startswith('-') and not arg.startswith('--'):
+            if arg not in ['-h', '-f', '-m', '-s', '-d', '-e']:
+                print(f"Error: Unsupported or incorrectly formatted option '{arg}'. Use proper short or long options.")
+                sys.exit(2)
 
-try:
-    opts, args = getopt.getopt(argv, "hf:m:s:d:e:", ["help", "config_file=", "mode=", "onlyschema=", "onlydata=", "fullextraction="])
-except getopt.GetoptError:
-    print("Error : Unsupported option/values. Run migration.py -h or --help for help")
-    sys.exit(2)
+    try:
+        opts, args = getopt.getopt(argv, "hf:m:s:d:e:", ["help", "config_file=", "mode=", "onlyschema=", "onlydata=", "fullextraction="])
+    except getopt.GetoptError:
+        print("Error : Unsupported option/values. Run migration.py -h or --help for help")
+        sys.exit(2)
 
-for opt, arg in opts:
-    if opt in ("-f", "--config_file"):
-        config_file = arg
-    elif opt in ("-m", "--mode"):
-        if arg != 'w':
-            sys.exit("Error: --mode or -m only supports 'w' as a valid value.")
-        dbmode = arg
-    elif opt in ("-s", "--onlyschema"):
-        if arg.lower() != 'y':
-            sys.exit("Error: --onlyschema or -s only supports 'y'. Use this option only if you want to unload only schema.")
-        onlyschema = arg.lower()
-    elif opt in ("-d", "--onlydata"):
-        if arg.lower() != 'y':
-            sys.exit("Error: --onlydata or -d only supports 'y'. Use this option only if you want to unload only data.")
-        onlydata = arg.lower()
-    elif opt in ("-e", "--fullextraction"):
-        if arg.lower() != 'y':
-            sys.exit("Error: --fullextraction or -e only supports 'y'. Use this option only if you want unload both schema and data.")
-        fullextraction = arg.lower()    
+    for opt, arg in opts:
+        if opt in ("-f", "--config_file"):
+            config_file = arg
+        elif opt in ("-m", "--mode"):
+            if arg != 'w':
+                sys.exit("Error: --mode or -m only supports 'w' as a valid value.")
+            dbmode = arg
+        elif opt in ("-s", "--onlyschema"):
+            if arg.lower() != 'y':
+                sys.exit("Error: --onlyschema or -s only supports 'y'. Use this option only if you want to unload only schema.")
+            onlyschema = arg.lower()
+        elif opt in ("-d", "--onlydata"):
+            if arg.lower() != 'y':
+                sys.exit("Error: --onlydata or -d only supports 'y'. Use this option only if you want to unload only data.")
+            onlydata = arg.lower()
+        elif opt in ("-e", "--fullextraction"):
+            if arg.lower() != 'y':
+                sys.exit("Error: --fullextraction or -e only supports 'y'. Use this option only if you want unload both schema and data.")
+            fullextraction = arg.lower()
 
-# Check if config_file is provided
-if config_file.strip() == '':
-    sys.exit("Error: --config_file or -f is a mandatory option. Please specify a valid config file path.")
+    # Check if config_file is provided
+    if config_file.strip() == '':
+        sys.exit("Error: --config_file or -f is a mandatory option. Please specify a valid config file path.")
 
-# Validation for mutual exclusivity
-flags = [onlyschema == 'y', onlydata == 'y', fullextraction == 'y']
-if flags.count(True) > 1:
-    sys.exit("Error: --onlyschema, --onlydata, and --fullextraction are mutually exclusive. Only one can be 'y'. Run migration.py -h or --help for help.")
-elif flags.count(True) == 0:
-    sys.exit("Error: One of --onlyschema, --onlydata, or --fullextraction must be 'y'. Run migration.py -h or --help for help.")
+    # Validation for mutual exclusivity
+    flags = [onlyschema == 'y', onlydata == 'y', fullextraction == 'y']
+    if flags.count(True) > 1:
+        sys.exit("Error: --onlyschema, --onlydata, and --fullextraction are mutually exclusive. Only one can be 'y'. Run migration.py -h or --help for help.")
+    elif flags.count(True) == 0:
+        sys.exit("Error: One of --onlyschema, --onlydata, or --fullextraction must be 'y'. Run migration.py -h or --help for help.")
+
+    # Set environment variables so spawned child processes can access config
+    os.environ['_MIGRATION_CONFIG_FILE'] = config_file
+    os.environ['_MIGRATION_DBMODE'] = dbmode
+    os.environ['_MIGRATION_ONLYSCHEMA'] = onlyschema
+    os.environ['_MIGRATION_ONLYDATA'] = onlydata
+    os.environ['_MIGRATION_FULLEXTRACTION'] = fullextraction
 
 # detect the current working directory and print it
 path = os.getcwd()
@@ -121,9 +147,41 @@ else:
     newline = "\n"
 sys.path.insert(0, '%s%s..%sCommon%s'%(path,path_sep,path_sep,path_sep))
 import common
+if _is_child_process:
+    # Read password from a temporary credential file (not from env var, to avoid plaintext exposure).
+    # Do NOT delete the file here — multiple spawn children may need to read it.
+    # The parent registers an atexit handler to clean it up.
+    _pwd_file = os.environ.get('_MIGRATION_DBA_PWD_FILE', '')
+    if _pwd_file and os.path.isfile(_pwd_file):
+        try:
+            with open(_pwd_file, 'r') as _f:
+                _pwd = _f.read()
+        except OSError:
+            _pwd = ''
+    else:
+        _pwd = ''
+    if _pwd:
+        common._child_pwd = _pwd
 common.get_inputs(config_file,'Migration')
-common.host_validation(config_file,'Migration')
-common.mig_inputs(config_file,'Migration')
+if not _is_child_process:
+    common.host_validation(config_file,'Migration')
+    common.mig_inputs(config_file,'Migration')
+    # Write password to a temp file with restrictive permissions for child processes.
+    # Avoid storing passwords in environment variables where they are visible via /proc/<pid>/environ.
+    _fd, _pwd_path = tempfile.mkstemp(prefix='mig_cred_', suffix='.tmp')
+    try:
+        os.write(_fd, common.password.encode('utf-8'))
+    finally:
+        os.close(_fd)
+    if not is_windows:
+        os.chmod(_pwd_path, 0o600)
+    os.environ['_MIGRATION_DBA_PWD_FILE'] = _pwd_path
+    def _cleanup_pwd_file():
+        try:
+            os.unlink(_pwd_path)
+        except OSError:
+            pass
+    atexit.register(_cleanup_pwd_file)
 
 global migrationpath
 migrationpath = "%s%sMigration_Data"%(common.shared_path,path_sep)
@@ -158,12 +216,16 @@ extract_list = []
 global connection_list
 connection_list = []
 
+# Use fork on Linux (default) so child processes inherit all parent state (globals, logging, etc.)
+# Use spawn on Windows where fork is not available
+if is_windows:
+    multiprocessing.set_start_method('spawn', force=True)
+
 lock = multiprocessing.Lock()
 tables_count = multiprocessing.Value(ctypes.c_int, 0)
 fail_count = multiprocessing.Value(ctypes.c_int, 0)
 total_table = multiprocessing.Value(ctypes.c_int, 0)
 empty_table_count = multiprocessing.Value(ctypes.c_int, 0)
-
 
 # Read the json config file and get all values
 def get_inputs(config_file):
@@ -192,10 +254,7 @@ def get_inputs(config_file):
 
     str1 = "Migration path %s already exists. %sDo you want to %sR - Restart(Existing %s folder and its content would be deleted)%sE - Resume%sC - Cancel%sthe Migration process? (R/E/C): "%(migrationpath,newline,newline,migrationpath,newline,newline,newline)
     if os.path.isdir(migrationpath):
-        if(sys.version[0:2] == '2.'):
-            val = str(raw_input(str1))
-        else:
-            val = str(input(str1))
+        val = str(input(str1))
 
         if val.lower() == "r":
             if onlydata == 'y':
@@ -261,8 +320,6 @@ def get_inputs(config_file):
     if common.w == common.t:
         logging.info("Verifying HDLFS_Configuration")
         logging.info("%s"%(common.dividerline))
-
-    logging.info("Client Hostname: %s , ip-address : %s , full-hostname : %s"%(common.host,common.ipaddress,common.fullhostname))
 
     global connectstr
     connectstr = common.conn_str
@@ -379,6 +436,12 @@ def version_verify(connectstr):
 def charset_verify():
     logging.info("%s"%(common.dividerline))
     logging.info("IQ Database Charset: %s"%common.charset)
+    if common.charset.upper() == "CESU-8":
+        str1 = "Warning: Python has no codec for charset '%s'. Falling back to surrogate-safe UTF-8 for internal file encoding."%common.charset
+        common.print_and_log(str1)
+    elif common.charset.upper() in ('EUC_TAIWAN', 'EUC-TW'):
+        str1 = "Warning: Python has no codec for charset '%s'. Using latin-1 passthrough for schema files and UTF-8 for internal files."%common.charset
+        common.print_and_log(str1)
 
 # Function to check if db is readonly or not
 # If it is readonly then proceed else the utility should exit
@@ -418,10 +481,7 @@ def create_shareddir():
     try:
         if not(os.path.exists(common.shared_path)):
             str1 = "Shared Directory %s does not exists.%sDo you want to create Shared Directory? (Y/N): "%(common.shared_path,newline)
-            if(sys.version[0:2] == '2.'):
-                val = str(raw_input(str1))
-            else:
-                val = str(input(str1))
+            val = str(input(str1))
             if val.lower() == "y":
                 try:
                     os.mkdir(common.shared_path)
@@ -501,7 +561,7 @@ def iqunload_samehost():
 
 # Function to make a script for inqunload to run on different host
 def make_iqunloadscript(path ):
-    with codecs.open("SchemaUnload.sh", "w", common.charset) as f:
+    with open("SchemaUnload.sh", "w", encoding=common.get_valid_encoding(common.charset)) as f:
         f.write( "cd " + path + "%s"%(newline) )
         f.write( "SYBASE=" + path + ";export SYBASE"+ "%s"%(newline) )
         f.write( ". $SYBASE/IQ.sh " + "%s"%(newline) )
@@ -609,9 +669,10 @@ def iqunload_call():
 def load_reloadfile_to_list(filename):
     file_list = list()
     file_list.append("-- Creation of AutoUpdated_Reload.sql started. ")
-    with codecs.open("%s%s%s"%(migrationpath,path_sep,filename), "r", common.charset) as f:
-        for line in f.readlines():
-            file_list.append(line)
+    filepath = "%s%s%s"%(migrationpath,path_sep,filename)
+    content = common.read_file_decoded(filepath)
+    for line in content.splitlines(True):
+        file_list.append(line)
 
     file_list.append("-- Creation of AutoUpdated_Reload.sql completed. ")
     return file_list
@@ -621,9 +682,10 @@ def load_artifactsfile_to_list(filename):
     artifact_list = list()
     pwd = os.getcwd()
 
-    with codecs.open("%s%s..%sCommon%s%s"%(pwd,path_sep,path_sep,path_sep,filename), "r", common.charset) as f:
-        for line in f.readlines():
-            line = line.rstrip(newline)
+    path = os.path.join(pwd, "..", "Common", filename)
+    with open(path, "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
+        for raw in f:
+            line = raw.rstrip(newline)
             splits = line.split(',')
             length = len(splits)
             if length == 2:
@@ -637,9 +699,10 @@ def load_artifactsfile_to_list(filename):
 # Function to write the list into a new file
 # This function is used to write modified schema into AutoUpdated_Reload.sql
 def write_lines_intofile(filename, lines):
-    with codecs.open("%s"%(filename), "w", common.charset) as f:
-        for line in lines:
-            f.write(line + "%s"%(newline))
+    content = ""
+    for line in lines:
+        content += line + "%s"%(newline)
+    common.write_file_encoded(filename, content)
     return
 
 # Function to add dbo user dependent objects in DB_Artifacts.list
@@ -648,7 +711,7 @@ def dbo_user_dependent_objects(conn, dbo_artifact_list):
 
     table_id_list = []
     # Get the tableid and tablename of dbo user tables
-    cursor.execute("select table_id, table_name from SYS.SYSTABLE JOIN SYS.SYSUSER ON user_id = creator WHERE lower(user_name) in ('dbo')  AND table_type = 'BASE' and server_type='IQ';")
+    cursor.execute("select table_id, table_name from SYS.SYSTABLE JOIN SYS.SYSUSER ON user_id = creator WHERE lower(user_name) in ('dbo')  AND table_type = 'BASE' and server_type in('IQ','SA');")
     records = cursor.fetchall()
     for i in records:
         dbo_artifact_list.append((i[1],"COMMENT","CREATE TABLE","dbo"))
@@ -740,10 +803,10 @@ def sap_user_dependent_objects(conn, sap_artifact_list):
             sap_artifact_list.append((i[0], "COMMENT", "GRANT CONNECT", "NULL"))
 
     table_id_list = []
-    cursor.execute(r"""SELECT t.table_id, t.table_name, u.user_name 
-                       FROM SYS.SYSTABLE t 
-                       JOIN SYS.SYSUSER u ON t.creator = u.user_id 
-                       WHERE lower(u.user_name) LIKE '_sap\_%' ESCAPE '\' 
+    cursor.execute(r"""SELECT t.table_id, t.table_name, u.user_name
+                       FROM SYS.SYSTABLE t
+                       JOIN SYS.SYSUSER u ON t.creator = u.user_id
+                       WHERE lower(u.user_name) LIKE '_sap\_%' ESCAPE '\'
                        AND t.table_type = 'BASE' AND t.server_type = 'IQ'""")
     records = cursor.fetchall()
     for table_id, table_name, user_name in records:
@@ -801,9 +864,9 @@ def sap_user_dependent_objects(conn, sap_artifact_list):
         sap_artifact_list.append((i[0], "COMMENT", "COMMENT TO PRESERVE FORMAT ON", "Procedure"))
         sap_artifact_list.append((i[0], "COMMENT", "CREATE FUNCTION", "NULL"))
 
-    cursor.execute(r"""SELECT s.name 
-                       FROM sysobjects s 
-                       JOIN SYS.SYSUSER u ON s.uid = u.user_id 
+    cursor.execute(r"""SELECT s.name
+                       FROM sysobjects s
+                       JOIN SYS.SYSUSER u ON s.uid = u.user_id
                        WHERE lower(u.user_name) LIKE '_sap\_%' ESCAPE '\' AND s.type = 'TR'""")
     for i in cursor.fetchall():
         sap_artifact_list.append((i[0], "COMMENT", "CREATE TRIGGER", "NULL"))
@@ -903,14 +966,14 @@ def modify_artifacts_file(filename, connectstr):
     artifact_list = load_artifactsfile_to_list(filename)
 
     # Add dbopts_noncustomer.csv for comment in list
-    with codecs.open(dbopts_list, "r", common.charset) as f:
+    with open(dbopts_list, "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
         for line in f.readlines():
             line = line.rstrip(newline)
             artifact_list.append((line,"COMMENT","SET OPTION","NULL"))
             artifact_list.append((line,"COMMENT","SET TEMPORARY OPTION","NULL"))
 
     # Add hosparams_noncustomer.csv for comment in list
-    with codecs.open(hosparams_list, "r", common.charset) as f:
+    with open(hosparams_list, "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
         for line in f.readlines():
             line = line.rstrip(newline)
             artifact_list.append((line,"COMMENT","SET OPTION","NULL"))
@@ -991,9 +1054,9 @@ def modify_artifacts_file(filename, connectstr):
 # Function to read login options file
 def load_login_list(f):
     login_list = list()
-    with codecs.open("%s"%(f),"r", common.charset) as f:
-        for line in f.readlines():
-            line = line.rstrip(newline)
+    with open("%s"%(f), "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
+        for raw in f:
+            line = raw.rstrip(newline)
             splits = line.split('=')
             login_list.append((splits[0].strip(),splits[1].strip()))
     return login_list
@@ -1302,10 +1365,20 @@ def verify_foreignkey_constraint():
 
     ForeignKey_complete = 0
     if os.path.isfile(ForeignKey_path):
-        with codecs.open("%s"%(ForeignKey_path), "r", common.charset) as f:
-            last_line = f.readlines()[-1]
-            if "Creation of Foreign_Key_Constraint.sql completed." in last_line:
-                ForeignKey_complete = 1
+        try:
+            with open("%s"%(ForeignKey_path), "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
+                lines = f.readlines()
+                if len(lines) > 0:
+                    last_line = lines[-1]
+                    if "Creation of Foreign_Key_Constraint.sql completed." in last_line:
+                        ForeignKey_complete = 1
+                else:
+                    # File is empty or corrupted
+                    logging.warning(f"Foreign_Key_Constraint.sql file is empty or could not be read properly. File size: {os.path.getsize(ForeignKey_path)} bytes")
+                    ForeignKey_complete = 0
+        except (IOError, OSError) as e:
+            logging.error(f"Error reading Foreign_Key_Constraint.sql: {str(e)}")
+            ForeignKey_complete = 0
 
     return ForeignKey_complete
 
@@ -1328,10 +1401,24 @@ def verify_autoupdated_reload():
 
     AutoUpdatedReload_complete = 0
     if os.path.isfile(AutoUpdatedReload_path):
-        with codecs.open("%s"%(AutoUpdatedReload_path), "r", common.charset) as f:
-            last_line = f.readlines()[-1]
-            if "Creation of AutoUpdated_Reload.sql completed." in last_line:
-                AutoUpdatedReload_complete = 1
+        try:
+            with open("%s"%(AutoUpdatedReload_path), "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
+                lines = f.readlines()
+                # Find the last non-empty, non-whitespace-only line to avoid
+                # treating a trailing blank line as the final meaningful line.
+                last_non_empty = next((ln for ln in reversed(lines) if ln.strip()), '')
+
+                if last_non_empty:
+                    logging.info("Last non-empty line of the file: %s", last_non_empty.strip())
+                    if "Creation of AutoUpdated_Reload.sql completed." in last_non_empty:
+                        AutoUpdatedReload_complete = 1
+                else:
+                    # File is empty or contains only whitespace lines
+                    logging.warning("AutoUpdated_Reload.sql file is empty or could not be read properly. File size: %s bytes", os.path.getsize(AutoUpdatedReload_path))
+                    AutoUpdatedReload_complete = 0
+        except (IOError, OSError) as e:
+            logging.error(f"Error reading AutoUpdated_Reload.sql: {str(e)}")
+            AutoUpdatedReload_complete = 0
 
     return AutoUpdatedReload_complete
 
@@ -1400,7 +1487,7 @@ def schema_unload_and_modify(connectstr):
     iqunload_total_elaptime = common.elap_time(iqunload_total_strt)
     days, hours, minutes, seconds = common.calculate_time(iqunload_total_elaptime)
     logging.info("%s"%(common.dividerline))
-    logging.info("Time taken to unload Schema: %s%d days, %d hours, %d minutes and %d seconds" % ( newline,days[0], hours[0], minutes[0], seconds[0]))
+    logging.info("Time taken to unload Schema: %s%d days, %d hours, %d minutes and %.2f seconds" % ( newline,days[0], hours[0], minutes[0], seconds[0]))
     logging.info("%s"%(common.dividerline))
 
     modify_total_strt = datetime.datetime.now()
@@ -1435,7 +1522,7 @@ def schema_unload_and_modify(connectstr):
     modify_total_elaptime = common.elap_time(modify_total_strt)
     days, hours, minutes, seconds = common.calculate_time(modify_total_elaptime)
     logging.info("%s"%(common.dividerline))
-    logging.info("Time taken to modify the Schema: %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0]))
+    logging.info("Time taken to modify the Schema: %s%d days, %d hours, %d minutes and %.2f seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0]))
     logging.info("%s"%(common.dividerline))
 
 
@@ -1447,7 +1534,7 @@ def getfilelist_fromesinfo(tableid,path_to_copy):
     PATH = '%s%s%s%s%sextractinfo'%(datapath,path_sep,tableid,path_sep,tableid)
 
     if os.path.isfile(PATH) and os.access(PATH, os.R_OK):
-        with codecs.open("%s%s%sextractinfo"%(path_to_copy,path_sep,tableid), "r", common.charset) as f:
+        with open(PATH, "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
             for lines in f:
                 for word in lines.split("'"):
                     for words in word.split(','):
@@ -1461,12 +1548,20 @@ def getfilelist_fromesinfo(tableid,path_to_copy):
 def rowCountVerifyInHDL(tablename,path_to_copy,cntstmt,f):
     rowcount = tablename[1]
     splits = tablename[0].split('.')
-    table = splits[1]
-    owner = splits[0]
+    table = common.to_cesu8_str(splits[1])
+    owner = common.to_cesu8_str(splits[0])
     if owner.lower() == 'dba':
         owner = "HDLADMIN"
 
     tab = "     "
+
+    # Adding the EXCEPTION block
+    f.write(newline + "EXCEPTION")
+    f.write(newline + tab + "WHEN OTHERS THEN")
+    f.write(newline + tab + tab + "MESSAGE 'Error: For table %s.%s Load failed: ', ERROR_MESSAGE() type warning to client;"%(owner, table))
+    f.write(newline + tab + tab + "ROLLBACK;")
+    f.write(newline + "END;" + newline)
+
     f.write(newline + newline + "BEGIN")
     f.write(newline + tab + "DECLARE cnt UNSIGNED BIGINT;")
     f.write(newline + newline + tab + cntstmt + ";")
@@ -1488,82 +1583,92 @@ def form_load_table_stmt(tablename, conn, path_to_copy, binary):
     tableid = tablename[3]
     table = splits[1]
     owner = splits[0]
-    with codecs.open("%s%s%s.sql"%(path_to_copy,path_sep,tableid), "w", common.charset) as f1:
-        f1.write("COMMIT;" + newline)
-        f1.write("set temporary option \"auto_commit\" = 'OFF';"+ newline)
-        f1.write("set temporary option disable_ri_check= 'on';"+ newline)
+    cesu_table = common.to_cesu8_str(table)
+    cesu_owner = common.to_cesu8_str(owner)
+    tab = "     "
+    sql_path = "%s%s%s.sql"%(path_to_copy,path_sep,tableid)
+    f1 = open(sql_path, "w", encoding=common.get_valid_encoding(common.charset), errors=common.get_encoding_errors())
+    f1.write("COMMIT;" + newline)
+    f1.write("set temporary option \"auto_commit\" = 'OFF';"+ newline)
+    f1.write("set temporary option disable_ri_check= 'on';"+ newline)
+    cursor3 = conn.cursor()
+    cursor3.execute("select setting from SYSOPTIONS where \"option\"='string_rtruncation';")
+    string_truncation = cursor3.fetchone()[0]
+    if string_truncation.lower() == "on":
+        cursor3.execute("set temporary option STRING_RTRUNCATION = 'off'")
+    cursor3.execute("select \"default\" from SYS.SYSCOLUMN c JOIN SYS.SYSTABLE t ON (c.table_id = t.table_id ) JOIN SYS.SYSUSER u ON (u.user_id = t.creator) where  t.table_name='%s' and u.user_name='%s'"%(table, owner ))
+    idtcol = []
+    idtflag = 0
+    for idt in cursor3:
+        idtcol.append(idt[0])
+    if 'Identity/Autoincrement' in idtcol or 'autoincrement' in idtcol:
+        idtflag = 1
+    if owner.lower() == 'dba':
+        # TRUNCATE TABLE before LOAD to ensure idempotent re-runs (prevent double data loading)
+        f1.write("TRUNCATE TABLE \"HDLADMIN\".\"%s\";"%(cesu_table) + newline)
         f1.write("BEGIN TRANSACTION;" + newline)
-        cursor3 = conn.cursor()
-        cursor3.execute("select setting from SYSOPTIONS where \"option\"='string_rtruncation';")
-        string_truncation = cursor3.fetchone()[0]
-        if string_truncation.lower() == "on":
-            cursor3.execute("set temporary option STRING_RTRUNCATION = 'off'")
-        cursor3.execute("select \"default\" from SYS.SYSCOLUMN c JOIN SYS.SYSTABLE t ON (c.table_id = t.table_id ) JOIN SYS.SYSUSER u ON (u.user_id = t.creator) where  t.table_name='%s' and u.user_name='%s'"%(table, owner ))
-        idtcol = []
-        idtflag = 0
-        for idt in cursor3:
-            idtcol.append(idt[0])
-        if 'Identity/Autoincrement' in idtcol or 'autoincrement' in idtcol:
-            idtflag = 1
-        if owner.lower() == 'dba':
-            command1 = "LOAD TABLE \"HDLADMIN\".\"%s\""%(table)
-            f1.write("sp_iqlogtoiqmsg('HDL-Migration: " + command1 + "');" + newline + newline)
-            if idtflag == 1:
-                f1.write("set temporary option \"identity_insert\" = \"HDLADMIN.%s\";"%(table)+ newline + newline)
-            cntstmt = "SELECT count(*) into cnt FROM  \"HDLADMIN\".\"%s\""%(table)
+        command1 = "LOAD TABLE \"HDLADMIN\".\"%s\""%(cesu_table)
+        f1.write("sp_iqlogtoiqmsg('HDL-Migration: " + command1 + "');" + newline + newline)
+        if idtflag == 1:
+            f1.write("set temporary option \"identity_insert\" = \"HDLADMIN.%s\";"%(cesu_table)+ newline + newline)
+        cntstmt = "SELECT count(*) into cnt FROM  \"HDLADMIN\".\"%s\""%(cesu_table)
+    else:
+        # TRUNCATE TABLE before LOAD to ensure idempotent re-runs (prevent double data loading)
+        f1.write("TRUNCATE TABLE \"%s\".\"%s\";"%(cesu_owner,cesu_table) + newline)
+        f1.write("BEGIN TRANSACTION;" + newline)
+        command1 = "LOAD TABLE \"%s\".\"%s\""%(cesu_owner,cesu_table)
+        f1.write("sp_iqlogtoiqmsg('HDL-Migration: " + command1 + "');" + newline + newline)
+        if idtflag == 1:
+            f1.write("set temporary option \"identity_insert\" = \"%s.%s\";"%(cesu_owner,cesu_table)+ newline + newline)
+        cntstmt = "SELECT count(*) into cnt FROM  \"%s\".\"%s\""%(cesu_owner,cesu_table)
+    cursor3.execute("select column_name from SYS.SYSCOLUMN c JOIN SYS.SYSTABLE t ON (c.table_id = t.table_id ) JOIN SYS.SYSUSER u ON (u.user_id = t.creator) where  t.table_name='%s' and u.user_name='%s'"%(table, owner ))
+    command2=""
+    collst = []
+    for col in cursor3:
+        collst.append(col[0])
+    n = len(collst)
+    if binary == 0:
+        for i in range(n-1):
+            command2 = command2 + '\"%s\"'%(collst[i]) + ", "
+        command2 = command2 + '\"%s\"'%(collst[n-1])
+    else:
+        for i in range(n-1):
+            command2 = command2 + '\"%s\"'%(collst[i]) + " BINARY WITH NULL BYTE, "
+        command2 = command2 + '\"%s\"'%(collst[n-1]) + " BINARY WITH NULL BYTE"
+    command = command1 + "( " + command2 + " )"
+    # Wrapping LOAD in a BEGIN block
+    f1.write(newline + "BEGIN" + newline)
+    f1.write(tab + command + newline)
+    cursor3.close()
+
+    f1.write(tab + tab + "FROM" + " ")
+    filelst = list()
+    l = list()
+
+    l = getfilelist_fromesinfo(tableid,path_to_copy)
+
+    obj_path = "hdlfs:///%s/Extracted_Data/%s/"%(common.hdlfs_directory,tableid)
+    for lst in l:
+        filelst.append("'"+obj_path+str(lst)+"'")
+
+    my_string = ','.join(map(str, filelst))
+    f1.write(my_string )
+
+    if binary == 0:
+        f1.write(newline + tab + tab + "quotes off")
+        f1.write(newline + tab + tab + "escapes off")
+        f1.write(newline + tab + tab + "row delimited by \'\\" + "x0a" "'"+";")
+    else:
+        f1.write(newline + tab + tab + "escapes off")
+        f1.write(newline + tab + tab + "defaults off")
+        f1.write(newline + tab + tab + "FORMAT BINARY")
+        f1.write(newline + tab + tab + "CHECK CONSTRAINTS OFF")
+        if byteorder == "little":
+            f1.write(newline + tab + tab + "BYTE ORDER LOW"+ ";")
         else:
-            command1 = "LOAD TABLE \"%s\".\"%s\""%(owner,table)
-            f1.write("sp_iqlogtoiqmsg('HDL-Migration: " + command1 + "');" + newline + newline)
-            if idtflag == 1:
-                f1.write("set temporary option \"identity_insert\" = \"%s.%s\";"%(owner,table)+ newline + newline)
-            cntstmt = "SELECT count(*) into cnt FROM  \"%s\".\"%s\""%(owner,table)
-        cursor3.execute("select column_name from SYS.SYSCOLUMN c JOIN SYS.SYSTABLE t ON (c.table_id = t.table_id ) JOIN SYS.SYSUSER u ON (u.user_id = t.creator) where  t.table_name='%s' and u.user_name='%s'"%(table, owner ))
-        command2=""
-        collst = []
-        for col in cursor3:
-            collst.append(col[0])
-        n = len(collst)
-        if binary == 0:
-            for i in range(n-1):
-                command2 = command2 + '\"%s\"'%(collst[i]) + ", "
-            command2 = command2 + '\"%s\"'%(collst[n-1])
-        else:
-            for i in range(n-1):
-                command2 = command2 + '\"%s\"'%(collst[i]) + " BINARY WITH NULL BYTE, "
-            command2 = command2 + '\"%s\"'%(collst[n-1]) + " BINARY WITH NULL BYTE"
-        command = " " + command1 + "( " + command2 + " )"
-        f1.write(command)
-        cursor3.close()
+            f1.write(newline + tab + tab + "BYTE ORDER HIGH"+ ";")
 
-        tab = "     "
-        f1.write(newline + tab + "FROM" + " ")
-        filelst = list()
-        l = list()
-
-        l = getfilelist_fromesinfo(tableid,path_to_copy)
-
-        obj_path = "hdlfs:///%s/Extracted_Data/%s/"%(common.hdlfs_directory,tableid)
-        for lst in l:
-            filelst.append("'"+obj_path+str(lst)+"'")
-
-        my_string = ','.join(map(str, filelst))
-        f1.write(my_string )
-
-        if binary == 0:
-            f1.write(newline + tab + "quotes off")
-            f1.write(newline + tab + "escapes off")
-            f1.write(newline + tab + "row delimited by \'\\" + "x0a" "'"+";")
-        else:
-            f1.write(newline + tab + "escapes off")
-            f1.write(newline + tab + "defaults off")
-            f1.write(newline + tab + "FORMAT BINARY")
-            f1.write(newline + tab + "CHECK CONSTRAINTS OFF")
-            if byteorder == "little":
-                f1.write(newline + tab + "BYTE ORDER LOW"+ ";")
-            else:
-                f1.write(newline + tab + "BYTE ORDER HIGH"+ ";")
-
-        rowCountVerifyInHDL(tablename,path_to_copy,cntstmt,f1)
+    rowCountVerifyInHDL(tablename,path_to_copy,cntstmt,f1)
 
 # Function to load iq_tables.list into a list
 def form_load_table_sequential(tablename, conn, path_to_copy, binary):
@@ -1572,84 +1677,95 @@ def form_load_table_sequential(tablename, conn, path_to_copy, binary):
     table = splits[1]
     tableid = tablename[3]
     owner = splits[0]
-    with codecs.open("%s%s%s.sql"%(path_to_copy,path_sep,tableid), "w", common.charset) as f1:
-        f1.write("set temporary option \"auto_commit\" = 'OFF';"+ newline + newline)
-        f1.write("set temporary option disable_ri_check= 'on';"+ newline)
-        f1.write("COMMIT;" + newline)
+    cesu_table = common.to_cesu8_str(table)
+    cesu_owner = common.to_cesu8_str(owner)
+    tab = "     "
+    sql_path = "%s%s%s.sql"%(path_to_copy,path_sep,tableid)
+    f1 = open(sql_path, "w", encoding=common.get_valid_encoding(common.charset), errors=common.get_encoding_errors())
+    f1.write("set temporary option \"auto_commit\" = 'OFF';"+ newline + newline)
+    f1.write("set temporary option disable_ri_check= 'on';"+ newline)
+    f1.write("COMMIT;" + newline)
+    cursor3 = conn.cursor()
+    cursor3.execute("select \"default\" from SYS.SYSCOLUMN c JOIN SYS.SYSTABLE t ON (c.table_id = t.table_id ) JOIN SYS.SYSUSER u ON (u.user_id = t.creator) where  t.table_name='%s' and u.user_name='%s'"%(table, owner ))
+    idtcol = []
+    idtflag = 0
+    for idt in cursor3:
+        idtcol.append(idt[0])
+    if 'Identity/Autoincrement' in idtcol or 'autoincrement' in idtcol:
+        idtflag = 1
+    if owner.lower() == 'dba':
+        # TRUNCATE TABLE before LOAD to ensure idempotent re-runs (prevent double data loading)
+        f1.write("TRUNCATE TABLE \"HDLADMIN\".\"%s\";"%(cesu_table) + newline)
         f1.write("BEGIN TRANSACTION;" + newline)
-        cursor3 = conn.cursor()
-        cursor3.execute("select \"default\" from SYS.SYSCOLUMN c JOIN SYS.SYSTABLE t ON (c.table_id = t.table_id ) JOIN SYS.SYSUSER u ON (u.user_id = t.creator) where  t.table_name='%s' and u.user_name='%s'"%(table, owner ))
-        idtcol = []
-        idtflag = 0
-        for idt in cursor3:
-            idtcol.append(idt[0])
-        if 'Identity/Autoincrement' in idtcol or 'autoincrement' in idtcol:
-            idtflag = 1
-        if owner.lower() == 'dba':
-            command1 = "LOAD TABLE \"HDLADMIN\".\"%s\""%(table)
-            f1.write("sp_iqlogtoiqmsg('HDL-Migration: " + command1 + "');" + newline + newline)
-            if idtflag == 1:
-                f1.write("set temporary option \"identity_insert\" = \"HDLADMIN.%s\";"%(table)+ newline + newline)
-            cntstmt = "SELECT count(*) into cnt FROM  \"HDLADMIN\".\"%s\""%(table)
-        else:
-            command1 = "LOAD TABLE \"%s\".\"%s\""%(owner,table)
-            f1.write("sp_iqlogtoiqmsg('HDL-Migration: " + command1 + "');" + newline + newline)
-            if idtflag == 1:
-                f1.write("set temporary option \"identity_insert\" = \"%s.%s\";"%(owner,table)+ newline + newline)
-            cntstmt = "SELECT count(*) into cnt FROM  \"%s\".\"%s\""%(owner,table)
-        cursor3.execute("select column_name from SYS.SYSCOLUMN c JOIN SYS.SYSTABLE t ON (c.table_id = t.table_id ) JOIN SYS.SYSUSER u ON (u.user_id = t.creator) where  t.table_name='%s' and u.user_name='%s'"%(table, owner ))
-        command2=""
-        collst = []
-        for col in cursor3:
-            collst.append(col[0])
-        n = len(collst)
-        if binary == 0:
-            for i in range(n-1):
-                command2 = command2 + '\"%s\"'%(collst[i]) + ", "
-            command2 = command2 + '\"%s\"'%(collst[n-1])
-        else:
-            for i in range(n-1):
-                command2 = command2 + '\"%s\"'%(collst[i]) + " BINARY WITH NULL BYTE, "
-            command2 = command2 + '\"%s\"'%(collst[n-1]) + " BINARY WITH NULL BYTE"
-        command = " " + command1 + "( " + command2 + " )"
-        f1.write(command)
-        cursor3.close()
-        tab = "     "
-        f1.write(newline + tab + "FROM" + " ")
-        fileext = ""
-        l = list()
-        filelst =  list()
-        if binary == 0:
-            fileext = 'txt'
-        else:
-            i = 1
-            while i < 9:
-                var = '%s_%s.inp'%(tableid,i)
-                l.append(var)
-                i = i + 1
+        command1 = "LOAD TABLE \"HDLADMIN\".\"%s\""%(cesu_table)
+        f1.write("sp_iqlogtoiqmsg('HDL-Migration: " + command1 + "');" + newline + newline)
+        if idtflag == 1:
+            f1.write("set temporary option \"identity_insert\" = \"HDLADMIN.%s\";"%(cesu_table)+ newline + newline)
+        cntstmt = "SELECT count(*) into cnt FROM  \"HDLADMIN\".\"%s\""%(cesu_table)
+    else:
+        # TRUNCATE TABLE before LOAD to ensure idempotent re-runs (prevent double data loading)
+        f1.write("TRUNCATE TABLE \"%s\".\"%s\";"%(cesu_owner,cesu_table) + newline)
+        f1.write("BEGIN TRANSACTION;" + newline)
+        command1 = "LOAD TABLE \"%s\".\"%s\""%(cesu_owner,cesu_table)
+        f1.write("sp_iqlogtoiqmsg('HDL-Migration: " + command1 + "');" + newline + newline)
+        if idtflag == 1:
+            f1.write("set temporary option \"identity_insert\" = \"%s.%s\";"%(cesu_owner,cesu_table)+ newline + newline)
+        cntstmt = "SELECT count(*) into cnt FROM  \"%s\".\"%s\""%(cesu_owner,cesu_table)
+    cursor3.execute("select column_name from SYS.SYSCOLUMN c JOIN SYS.SYSTABLE t ON (c.table_id = t.table_id ) JOIN SYS.SYSUSER u ON (u.user_id = t.creator) where  t.table_name='%s' and u.user_name='%s'"%(table, owner ))
+    command2=""
+    collst = []
+    for col in cursor3:
+        collst.append(col[0])
+    n = len(collst)
+    if binary == 0:
+        for i in range(n-1):
+            command2 = command2 + '\"%s\"'%(collst[i]) + ", "
+        command2 = command2 + '\"%s\"'%(collst[n-1])
+    else:
+        for i in range(n-1):
+            command2 = command2 + '\"%s\"'%(collst[i]) + " BINARY WITH NULL BYTE, "
+        command2 = command2 + '\"%s\"'%(collst[n-1]) + " BINARY WITH NULL BYTE"
+    command = command1 + "( " + command2 + " )"
+    # Wrapping LOAD in a BEGIN block
+    f1.write(newline + "BEGIN" + newline)
+    f1.write(tab + command + newline)
+    cursor3.close()
 
-        obj_path = "hdlfs:///%s/Extracted_Data/%s/"%(common.hdlfs_directory,tableid)
-        for lst in l:
-            filelst.append("'"+obj_path+str(lst)+"'")
+    f1.write(tab + tab + "FROM" + " ")
+    fileext = ""
+    l = list()
+    filelst =  list()
+    if binary == 0:
+        fileext = 'txt'
+    else:
+        i = 1
+        while i < 9:
+            var = '%s_%s.inp'%(tableid,i)
+            l.append(var)
+            i = i + 1
 
-        my_string = ','.join(map(str, filelst))
-        f1.write(my_string )
+    obj_path = "hdlfs:///%s/Extracted_Data/%s/"%(common.hdlfs_directory,tableid)
+    for lst in l:
+        filelst.append("'"+obj_path+str(lst)+"'")
 
-        if binary == 0:
-            f1.write(newline + tab + "defaults off")
-            f1.write(newline + tab + "escapes off")
-            f1.write(newline + tab + "row delimited by \'\\" + "n" "'"+";")
+    my_string = ','.join(map(str, filelst))
+    f1.write(my_string )
+
+    if binary == 0:
+        f1.write(newline + tab + tab + "defaults off")
+        f1.write(newline + tab + tab + "escapes off")
+        f1.write(newline + tab + tab + "row delimited by \'\\" + "n" "'"+";")
+    else:
+        f1.write(newline + tab + tab + "escapes off")
+        f1.write(newline + tab + tab + "defaults off")
+        f1.write(newline + tab + tab + "FORMAT BINARY")
+        f1.write(newline + tab + tab + "CHECK CONSTRAINTS OFF")
+        if byteorder == "little":
+            f1.write(newline + tab + tab + "BYTE ORDER LOW"+ ";")
         else:
-            f1.write(newline + tab + "escapes off")
-            f1.write(newline + tab + "defaults off")
-            f1.write(newline + tab + "FORMAT BINARY")
-            f1.write(newline + tab + "CHECK CONSTRAINTS OFF")
-            if byteorder == "little":
-                f1.write(newline + tab + "BYTE ORDER LOW"+ ";")
-            else:
-                f1.write(newline + tab + "BYTE ORDER HIGH"+ ";")
+            f1.write(newline + tab + tab + "BYTE ORDER HIGH"+ ";")
 
-        rowCountVerifyInHDL(tablename,path_to_copy,cntstmt,f1)
+    rowCountVerifyInHDL(tablename,path_to_copy,cntstmt,f1)
 
 # This function returns a key to be used in sorting list
 # In this case we are returning 3rd element which is size of that table
@@ -1686,7 +1802,7 @@ def generate_iqtablesize_withrowscount(connectstr):
     except Exception as exp:
         sys.exit("Exception: %s"%str(exp))
 
-    with codecs.open(iqtables_list, "w", common.charset) as f:
+    with open(iqtables_list, "w", encoding=common.get_valid_encoding(common.charset), newline='', errors=common.get_encoding_errors()) as f:
         cursor = conn.cursor()
         cursor.execute("SELECT table_name,user_name,t.table_id FROM SYS.SYSTABLE t JOIN SYS.SYSUSER u ON u.user_id = t.creator JOIN SYS.SYSIQTAB it ON (t.table_id = it.table_id) WHERE t.table_type not like '%GBL TEMP%' and t.server_type = 'IQ' AND it.is_rlv = 'F' and lower(user_name) != 'dbo' and lower(user_name) != 'hdladmin' AND lower(user_name) NOT LIKE '_sap\\_%' ESCAPE '\\'")
         records = cursor.fetchall()
@@ -1694,6 +1810,8 @@ def generate_iqtablesize_withrowscount(connectstr):
         i=0
         for row in records:
             i = i +1
+            tbl_name = row[0]
+            usr_name = row[1]
             count = 0
             cursor1 = conn.cursor()
             cursor1.execute("""select count(*) from "%s"."%s";"""%(row[1],row[0]) )
@@ -1711,14 +1829,14 @@ def generate_iqtablesize_withrowscount(connectstr):
             # Append newline to every record except the last record
             if i  == len(records):
                 if foreignkey_flag == 0:
-                    data = row[1] + "." + row[0] + "," + str(count) +  "," + str(tablesize) + "," + str(row[2]) + ","
+                    data = usr_name + "." + tbl_name + "," + str(count) +  "," + str(tablesize) + "," + str(row[2]) + ","
                 else:
-                    data = row[1] + "." + row[0] + "," + str(count) +  "," + str(tablesize) + "," + str(row[2]) + "," + "FOREIGN"
+                    data = usr_name + "." + tbl_name + "," + str(count) +  "," + str(tablesize) + "," + str(row[2]) + "," + "FOREIGN"
             else:
                 if foreignkey_flag == 0:
-                    data = row[1] + "." + row[0] + "," + str(count) +  "," + str(tablesize) + "," + str(row[2]) + "," + newline
+                    data = usr_name + "." + tbl_name + "," + str(count) +  "," + str(tablesize) + "," + str(row[2]) + "," + newline
                 else:
-                    data = row[1] + "." + row[0] + "," + str(count) +  "," + str(tablesize) + "," + str(row[2]) + "," + "FOREIGN" + newline
+                    data = usr_name + "." + tbl_name + "," + str(count) +  "," + str(tablesize) + "," + str(row[2]) + "," + "FOREIGN" + newline
             f.write(data)
             cursor1.close()
 
@@ -1731,8 +1849,8 @@ def generate_iqtablesize_withrowscount(connectstr):
 def original_iqtables_generate_batches():
     if batch != 0:
         tbl_list=[]
-        with codecs.open(iqtables_list, "r", common.charset) as f:
-            for line in f.readlines():
+        content = common.read_file_decoded(iqtables_list)
+        for line in content.splitlines():
                 stripped_line = line.rstrip(newline)
                 tbl = stripped_line.split(',')
                 tbl_list.append((tbl[0],tbl[1],int(tbl[2]),tbl[3],tbl[4]))
@@ -1761,7 +1879,7 @@ def partition_batches_on_size(table_list,batch_size,batch_cnt):
 
     if len(table_list) == 0 or int(table_list[0][2]) > int(batch_size):
         if len(table_list) != 0 :
-            with codecs.open(no_extraction_file,"w", common.charset) as f:
+            with open(batch_file, "w", encoding=common.get_valid_encoding(common.charset), errors=common.get_encoding_errors()) as f:
                 for row in table_list:
                     data = row[0] + "," + str(row[1]) + "," + str(row[2]) +  "," + str(row[3]) + "," + row[4] +  newline
                     f.write(data)
@@ -1774,7 +1892,7 @@ def partition_batches_on_size(table_list,batch_size,batch_cnt):
         else:
             break
 
-    with codecs.open(batch_file, "w", common.charset) as f:
+    with open(no_extraction_file, "w", encoding=common.get_valid_encoding(common.charset), errors=common.get_encoding_errors()) as f:
         for row in batch_table_list:
             data = row[0] + "," + str(row[1]) + "," + str(row[2]) +  "," + str(row[3]) + "," + row[4] +  newline
             f.write(data)
@@ -1801,11 +1919,13 @@ def verify_iq_table_file(connectstr):
 
         # Count the number of line in iq_tables file generated
         iqtables_file_count = 0
-        with codecs.open(iqtables_list, "r", common.charset) as f:
+        with open(iqtables_list, "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
             for line in f.readlines():
                 iqtables_file_count = iqtables_file_count + 1
 
         # The iq_tables file is generated successfully
+        logging.info("Total number of IQ tables to be unloaded: %s"%(count_iq_tables))
+        logging.info("Total number of IQ tables in %s file: %s"%(iqtables_list, iqtables_file_count))
         if count_iq_tables == iqtables_file_count:
             iqtables_complete = 1
 
@@ -1820,7 +1940,7 @@ def verify_batches_generated_iq_file():
 
     # Count the number of line in iq_tables file generated
     iqtables_lines_count = 0
-    with codecs.open(iqtables_list, "r", common.charset) as f:
+    with open(iqtables_list, "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
         for line in f.readlines():
             iqtables_lines_count = iqtables_lines_count + 1
 
@@ -1830,13 +1950,13 @@ def verify_batches_generated_iq_file():
     while batch_num <= batches_file_count:
         iqtables_batch="%s%siq_tables_Batch_%s.list"%(migrationpath,path_sep,batch_num)
         if os.path.isfile(iqtables_batch):
-            with codecs.open(iqtables_batch, "r", common.charset) as f:
+            with open(iqtables_batch, "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
                 for line in f.readlines():
                     batches_lines_count = batches_lines_count + 1
         batch_num = batch_num + 1
 
     if os.path.isfile(no_extraction_file):
-        with codecs.open(no_extraction_file, "r", common.charset) as f:
+        with open(no_extraction_file, "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
             for line in f.readlines():
                 batches_lines_count = batches_lines_count + 1
 
@@ -1889,7 +2009,7 @@ def check_and_create_iq_tables_file(connectstr):
     iq_total_elap_sec = common.elap_time(iq_table_start)
     days, hours, minutes, seconds = common.calculate_time(iq_total_elap_sec)
     logging.info("%s"%(common.dividerline))
-    logging.info("Time taken to create IQ table list %s: %s%d days, %d hours, %d minutes and %d seconds" % ( iqtables_list, newline, days[0], hours[0], minutes[0], seconds[0]))
+    logging.info("Time taken to create IQ table list %s: %s%d days, %d hours, %d minutes and %.2f seconds" % ( iqtables_list, newline, days[0], hours[0], minutes[0], seconds[0]))
     logging.info("%s"%(common.dividerline))
 
 # Function which adds entry in ExtractedTables.out on successful extraction of a table
@@ -1897,11 +2017,12 @@ def write_extractedTables_out(splits,batch):
     if batch != 0:
         global extractedTables_out
         extractedTables_out="%s%sExtractedTables_Batch_%s.out"%(migrationpath,path_sep,batch)
-    with codecs.open(extractedTables_out, "a", common.charset) as f:
-        if  splits[4]:
-            f.write(  splits[0]  + "," + str(splits[1]) + "," + str(splits[3]) + "," + str(splits[4]) + newline)
-        else:
-            f.write(  splits[0]  + "," + str(splits[1]) + "," + str(splits[3]) + ",BASE" + newline)
+    if  splits[4]:
+        data = splits[0]  + "," + str(splits[1]) + "," + str(splits[3]) + "," + str(splits[4]) + newline
+    else:
+        data = splits[0]  + "," + str(splits[1]) + "," + str(splits[3]) + ",BASE" + newline
+    with open(extractedTables_out, "a", encoding=common.get_valid_encoding(common.charset)) as f:
+        f.write(data)
     logging.info( "Adding entry in %s file %sfor table : %s [tableID:%s]"%(extractedTables_out,newline,splits[0],splits[3]))
     logging.info("%s"%(common.dividerline))
 
@@ -1913,13 +2034,14 @@ def formlist_tobeunloaded(batch):
     if batch != 0:
         global iqtables_list
         iqtables_list="%s%siq_tables_Batch_%s.list"%(migrationpath,path_sep,batch)
-    with codecs.open(iqtables_list, "r", common.charset) as f:
+    with open(iqtables_list, "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
         for line in f.readlines():
             line = line.rstrip(newline)
             splits = line.split(',')
             total_table.value = total_table.value + 1
             if(splits[1] != '0'):
                # Append the table names and its data into list to be processed for unload
+               logging.info("Queuing non-empty table for extraction: %s [tableID:%s, rowcount:%s]"%(splits[0], splits[3], splits[1]))
                if(splits[4]):
                   table_tobe_unloaded.append((splits[0], splits[1], splits[2], splits[3], splits[4]))
                else:
@@ -1929,6 +2051,10 @@ def formlist_tobeunloaded(batch):
                tables_count.value = tables_count.value + 1
                write_extractedTables_out(splits,batch)
                empty_table_count.value += 1
+
+    if len(table_tobe_unloaded) > 0:
+        str1 = "Number of Non-empty tables to be extracted : %s"%(len(table_tobe_unloaded))
+        common.print_and_log(str1)
 
     if empty_table_count.value != 0:
         str1 = "Number of Empty tables in database : %s %sNo need of extraction for empty tables."%(empty_table_count.value,newline)
@@ -1948,7 +2074,7 @@ def resume_formlist_tobeunloaded(batch):
         global extractedTables_out
         extractedTables_out="%s%sExtractedTables_Batch_%s.out"%(migrationpath,path_sep,batch)
 
-    extract_file = codecs.open(extractedTables_out,'r', common.charset)
+    extract_file = open(extractedTables_out, "r", encoding=common.get_valid_encoding(common.charset), errors="replace")
     lines = extract_file.readlines()
     for line in lines:
         line = line.rstrip(newline)
@@ -1960,7 +2086,7 @@ def resume_formlist_tobeunloaded(batch):
     if batch != 0:
         global iqtables_list
         iqtables_list="%s%siq_tables_Batch_%s.list"%(migrationpath,path_sep,batch)
-    iqtable_file = codecs.open(iqtables_list,'r', common.charset)
+    iqtable_file = open(iqtables_list, "r", encoding=common.get_valid_encoding(common.charset), errors="replace")
     lines = iqtable_file.readlines()
     for line in lines:
         line = line.rstrip(newline)
@@ -1986,15 +2112,20 @@ def resume_formlist_tobeunloaded(batch):
                 stripped_line = line.rstrip(newline)
                 splits = stripped_line.split(',')
                 if i == splits[0].strip() and (splits[1] != '0'):
-                   if(splits[4]):
-                      table_tobe_unloaded.append((splits[0], splits[1], splits[2], splits[3], splits[4]))
-                   else:
-                      table_tobe_unloaded.append((splits[0], splits[1], splits[2], splits[3] ,"BASE"))
+                    logging.info("Queuing non-empty table for extraction: %s [tableID:%s, rowcount:%s]"%(splits[0], splits[3], splits[1]))
+                    if(splits[4]):
+                        table_tobe_unloaded.append((splits[0], splits[1], splits[2], splits[3], splits[4]))
+                    else:
+                        table_tobe_unloaded.append((splits[0], splits[1], splits[2], splits[3] ,"BASE"))
                 elif i == splits[0].strip():
                    # Incresing the count for tables which extracted successfully
                    tables_count.value = tables_count.value + 1
                    write_extractedTables_out(splits,batch)
                    empty_table_count.value += 1
+
+        if len(table_tobe_unloaded) > 0:
+            str1 = "Number of Non-empty tables to be extracted : %s"%(len(table_tobe_unloaded))
+            common.print_and_log(str1)
 
         if empty_table_count.value != 0:
             str1 = "Number of Empty tables in database : %s %sNo need of extraction for empty tables.%s"%(empty_table_count.value,newline,newline)
@@ -2016,37 +2147,28 @@ def get_unload_table_list(batch):
         formlist_tobeunloaded(batch)
 
 # Function which adds the entry of table in ExtractedTables.out on successfull extraction
-def updateUnloadStatus(qSuccess,batch,total_table,tables_count,fail_count,file_write_lock):
+# Writes directly to file under lock - no queue drain pattern to avoid race conditions
+def updateUnloadStatus(owner, tableinfo, batch, total_table, tables_count, fail_count, file_write_lock):
     if batch != 0:
         global extractedTables_out
         extractedTables_out="%s%sExtractedTables_Batch_%s.out"%(migrationpath,path_sep,batch)
 
     with file_write_lock:
-        with codecs.open(extractedTables_out, "a", common.charset) as f:
-            while True:
-                try:
-                    owner,tableinfo= qSuccess.get_nowait()
-                    splits = tableinfo[0].split('.')
-                    table = splits[1]
-                    tableid = tableinfo[3]
-                    if  tableinfo[4]:
-                        f.write(  tableinfo[0]  + "," + str(tableinfo[1]) + "," + str(tableid) + "," + str(tableinfo[4]) + newline)
-                    else:
-                        f.write(  tableinfo[0]  + "," + str(tableinfo[1]) + "," + str(tableid) + ",BASE" + newline)
+        with open(extractedTables_out, "a", encoding=common.get_valid_encoding(common.charset)) as f:
+            splits = tableinfo[0].split('.')
+            table = splits[1]
+            tableid = tableinfo[3]
+            if  tableinfo[4]:
+                f.write(  tableinfo[0]  + "," + str(tableinfo[1]) + "," + str(tableid) + "," + str(tableinfo[4]) + newline)
+            else:
+                f.write(  tableinfo[0]  + "," + str(tableinfo[1]) + "," + str(tableid) + ",BASE" + newline)
 
-                    logging.info("Extraction of table %s [tableID: %s]  was successful"%(tableinfo[0],tableid))
-                    logging.info("%s"%(common.dividerline))
-                    logging.info("Adding entry in %s file %sfor table: %s [tableID: %s]"%(extractedTables_out,newline,tableinfo[0],tableid))
-                    f.flush()
-                    tables_count.value += 1
-                    progressBar(tables_count,fail_count,total_table)
-
-                    if total_table.value == tables_count.value + fail_count.value:
-                        break
-
-                except Exception as exp:
-                    break
-        f.close()
+            logging.info("Extraction of table %s [tableID: %s]  was successful"%(tableinfo[0],tableid))
+            logging.info("%s"%(common.dividerline))
+            logging.info("Adding entry in %s file %sfor table: %s [tableID: %s]"%(extractedTables_out,newline,tableinfo[0],tableid))
+            f.flush()
+            tables_count.value += 1
+            progressBar(tables_count,fail_count,total_table)
 
 # Function to display extraction progress
 def progressBar(current,fail_count,total_table):
@@ -2056,33 +2178,26 @@ def progressBar(current,fail_count,total_table):
         print("%s"%(common.dividerline))
 
 # Function which will table failed with exception in failure file
-def updateFailureStatus(qFail,batch,total_table,tables_count,fail_count,file_write_lock):
+# Writes directly to file under lock - no queue drain pattern to avoid race conditions
+def updateFailureStatus(owner, tableName, tableid, exp, batch, total_table, tables_count, fail_count, file_write_lock):
     if batch != 0:
         global extractedFailures_err
         extractedFailures_err = "%s%sextractFailure_Batch_%s.err"%(migrationpath,path_sep,batch)
     with file_write_lock:
-        with codecs.open(extractedFailures_err, "a", common.charset) as f:
-            while True:
-                try:
-                    owner,tableName,tableid,exp= qFail.get_nowait()
-                    f.write("%s Failed to extract "%(newline)+ owner + "." + tableName + " [tableID: "+ tableid+"]" + newline)
-                    f.write(str(exp))
-                    f.flush()
-                    logging.error("Adding entry in %s file %sfor table : %s.%s [tableID: %s]"%(extractedFailures_err,newline,owner,tableName,tableid))
-                    f.close()
-                    fail_count.value += 1
-                    progressBar(tables_count,fail_count,total_table)
-                    if total_table.value == tables_count.value + fail_count.value:
-                        break
-                except Exception as exp:
-                    break
-        f.close()
+        # Open in append mode so multiple failures are accumulated, not overwritten.
+        with open(extractedFailures_err, "a", encoding=common.get_valid_encoding(common.charset)) as f:
+            f.write("%s Failed to extract "%(newline)+ owner + "." + tableName + " [tableID: "+ tableid+"]" + newline)
+            f.write(str(exp) + newline)
+            f.flush()
+            logging.error("Adding entry in %s file %sfor table : %s.%s [tableID: %s]"%(extractedFailures_err,newline,owner,tableName,tableid))
+            fail_count.value += 1
+            progressBar(tables_count,fail_count,total_table)
 
 # Function to extract data using temporary options
 # which takes queue and get tablename to be extracted from that queue
 # and connection string from a list
 # This function is not for 16.1 SP01 and 16.0 SP11 versions
-def extract_single(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables_count,fail_count,file_write_lock):
+def extract_single(q, connstr_port,total_table,batch,log_q,tables_count,fail_count,file_write_lock):
     global compressed_data
     if log_q:
         qh = QueueHandler(log_q)
@@ -2101,10 +2216,11 @@ def extract_single(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables
             connectstr = connstr_port[0]
             hostport = connstr_port[1]
             is_table_failed = False
+            strt = datetime.datetime.now()
+            last_fail_exp = None
             try:
                 conn = pyodbc.connect(connectstr, timeout=0)
                 cursor = conn.cursor()
-                strt = datetime.datetime.now()
                 logging.info( "Starting extraction of table: %s.%s [tableID:%s] by : %s"%(owner,tableName,tableid,hostport))
                 logging.info("%s"%(common.dividerline))
 
@@ -2131,7 +2247,7 @@ def extract_single(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables
                     cursor.execute("set temporary option temp_extract_directory = '%s'"%(npath))
             except Exception as exp:
                 is_table_failed = True
-                qFail.put((owner,tableName,tableid,exp))
+                last_fail_exp = exp
 
             if count != 0:
                 if platform.system() == "Windows" and npath.startswith("\\"):
@@ -2150,7 +2266,7 @@ def extract_single(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables
                     cursor.execute(text).fetchall()
                 except Exception as exp:
                     is_table_failed = True
-                    qFail.put((owner,tableName,tableid,exp))
+                    last_fail_exp = exp
 
                 cursor.execute("SET TEMPORARY OPTION temp_extract_file_prefix =''")
 
@@ -2160,16 +2276,15 @@ def extract_single(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables
                     text1 = bfile_select_stmt(table_withsize,conn,npath)
                 try:
                     cursor.execute(text1).fetchall()
-                    qSuccess.put((owner,table_withsize))
                 except Exception as exp:
                     is_table_failed = True
-                    qFail.put((owner,tableName,tableid,exp))
+                    last_fail_exp = exp
 
                 try:
                     form_load_table_bfilesequential(table_withsize, conn, npath,1)
                 except Exception as exp:
                     is_table_failed = True
-                    qFail.put((owner,tableName,tableid,exp))
+                    last_fail_exp = exp
 
             else:
                 cursor.execute("SET TEMPORARY OPTION temp_extract_file_prefix ='%s'"%(tableid))
@@ -2195,49 +2310,41 @@ def extract_single(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables
                 select_query = """Select %s FROM "%s"."%s";"""%(column_string,owner,tableName)
                 try:
                     cursor.execute(select_query).fetchall()
-                    qSuccess.put((owner,table_withsize))
                 except Exception as exp:
                     is_table_failed = True
-                    qFail.put((owner,tableName,tableid,exp))
+                    last_fail_exp = exp
 
                 cursor.execute("SET TEMPORARY OPTION Temp_Extract_Binary = 'off'")
                 try:
                     form_load_table_stmt(table_withsize, conn, npath, 1)
                 except Exception as exp:
                     is_table_failed = True
-                    qFail.put((owner,tableName,tableid,exp))
+                    last_fail_exp = exp
 
             cursor.execute("SET TEMPORARY OPTION temp_extract_file_prefix = ''")
             if compressed_data == 1:
                 cursor.execute("set temporary option Temp_Extract_Compress = 'off'")
 
-            lock.acquire()
-            try:
+            with lock:
                 PATH = '%s%s%s%s%sextractinfo'%(datapath,path_sep,tableid,path_sep,tableid)
                 if (os.path.isfile(PATH) and os.access(PATH, os.R_OK)):
-                    updateUnloadStatus(qSuccess,batch,total_table,tables_count,fail_count,file_write_lock)
+                    updateUnloadStatus(owner, table_withsize, batch, total_table, tables_count, fail_count, file_write_lock)
                 if is_table_failed:
-                    updateFailureStatus(qFail,batch,total_table,tables_count,fail_count,file_write_lock)
-
-            finally:
-                lock.release() #release lock
+                    updateFailureStatus(owner, tableName, tableid, last_fail_exp, batch, total_table, tables_count, fail_count, file_write_lock)
 
             elap_sec = common.elap_time(strt)
             days, hours, minutes, seconds = common.calculate_time(elap_sec)
 
-            logging.info("Time taken to unload table: %s [tableID: %s] is : %d days, %d hours, %d minutes and %d seconds\n" % (tableName, tableid,days[0], hours[0], minutes[0], seconds[0]))
+            logging.info("Time taken to unload table: %s.%s [tableID:%s] by %s : %d days, %d hours, %d minutes and %.2f seconds (total: %.3f sec)" % (owner, tableName, tableid, hostport, days[0], hours[0], minutes[0], seconds[0], elap_sec))
             logging.info("%s"%(common.dividerline))
             cursor.close()
             conn.close()
         except Exception as exp:
-            #TODO : Need to fix of NUll entries in the queue
-            # Also add try/catch blocks all where needed
-            #logging.info("Exception occurred while extracting table: %s"%(tableName))
             if str(exp) != "":
                 logging.error("Unexpected error in extract_single() reported while extracting data: %s"%str(exp))
-                qFail.put((owner,tableName,tableid,exp))
-                updateFailureStatus(qFail,batch,total_table,tables_count,fail_count,file_write_lock)
+                updateFailureStatus(owner, tableName, tableid, exp, batch, total_table, tables_count, fail_count, file_write_lock)
             else:
+                logging.warning("Empty exception caught in extract_single() - queue may be exhausted")
                 return
 
 # For version 16.0 SP11 if a table has LOB datatypes then extraction should be done using BFILE() method
@@ -2258,10 +2365,11 @@ def form_select_for_lobbfile(tablename,conn,path_to_copy):
     cmd = "SELECT "
     filelst = []
     for i in column_domain_list:
+        col_name = '\"' + i[0] + '\"'  # manually add double quotes around column name
         if i[1] == 'long varchar' or i[1] == 'long binary':
-            filelst.append( "CASE WHEN " + i[0] + " IS NOT NULL THEN" + "('" + obj_path + "' + '" + tableid + "_" + "row' + " + "string(rowid(\"" + table + "\" )) + '.' + '" + str(i[2]) + "') " + "ELSE NULL END" )
+            filelst.append( "CASE WHEN " + col_name + " IS NOT NULL THEN" + "('" + obj_path + "' + '" + tableid + "_" + "row' + " + "string(rowid(\"" + table + "\" )) + '.' + '" + str(i[2]) + "') " + "ELSE NULL END" )
         else:
-            filelst.append( i[0])
+            filelst.append(col_name)
 
     my_string = " ,".join(filelst)
 
@@ -2286,8 +2394,9 @@ def bfile_select_stmt(tablename,conn,path_to_copy):
     cmd = "SELECT "
     filelst = []
     for i in column_domain_list:
+        col_name = '\"' + i[0] + '\"'  # manually add double quotes around column name
         if i[1] == 'long varchar' or i[1] == 'long binary':
-            filelst.append( "BFILE('" + path_to_copy + "/' + '" + tableid + "_" + "row' + " + "string(rowid(\"" + table + "\" )) + '.' + '" + str(i[2]) + "', " + i[0] + ")")
+            filelst.append( "BFILE('" + path_to_copy + "/' + '" + tableid + "_" + "row' + " + "string(rowid(\"" + table + "\" )) + '.' + '" + str(i[2]) + "', " + col_name + ")")
 
     my_string = " ,".join(filelst)
     command1 = " FROM \"%s\".\"%s\""%(owner,table)
@@ -2302,11 +2411,11 @@ def form_load_table_bfilesequential(tablename, conn, path_to_copy,parl):
     table = splits[1]
     owner = splits[0]
     tableid = tablename[3]
-    with codecs.open("%s%s%s.sql"%(path_to_copy,path_sep,tableid), "w", common.charset) as f1:
+    tab = "     "
+    with open("%s%s%s.sql"%(path_to_copy,path_sep,tableid), "w", encoding=common.get_valid_encoding(common.charset)) as f1:
         f1.write("set temporary option \"auto_commit\" = 'OFF';"+ "%s%s"%(newline,newline))
         f1.write("set temporary option disable_ri_check= 'on';"+ "%s%s"%(newline,newline))
         f1.write("COMMIT;" + newline)
-        f1.write("BEGIN TRANSACTION;" + newline)
 
         cursor3 = conn.cursor()
         cursor3.execute("select setting from SYSOPTIONS where \"option\"='string_rtruncation';")
@@ -2321,12 +2430,18 @@ def form_load_table_bfilesequential(tablename, conn, path_to_copy,parl):
         if 'Identity/Autoincrement' in idtcol or 'autoincrement' in idtcol:
             idtflag = 1
         if owner.lower() == 'dba':
+            # TRUNCATE TABLE before LOAD to ensure idempotent re-runs (prevent double data loading)
+            f1.write("TRUNCATE TABLE \"HDLADMIN\".\"%s\";"%(table) + newline)
+            f1.write("BEGIN TRANSACTION;" + newline)
             command1 = "LOAD TABLE \"HDLADMIN\".\"%s\""%(table)
             f1.write("sp_iqlogtoiqmsg('HDL-Migration: " + command1 + "');" + newline + newline)
             if idtflag == 1:
                 f1.write("set temporary option \"identity_insert\" = \"HDLADMIN.%s\";"%(table)+ newline + newline)
             cntstmt = "SELECT count(*) into cnt FROM  \"HDLADMIN\".\"%s\""%(table)
         else:
+            # TRUNCATE TABLE before LOAD to ensure idempotent re-runs (prevent double data loading)
+            f1.write("TRUNCATE TABLE \"%s\".\"%s\";"%(owner,table) + newline)
+            f1.write("BEGIN TRANSACTION;" + newline)
             command1 = "LOAD TABLE \"%s\".\"%s\""%(owner,table)
             f1.write("sp_iqlogtoiqmsg('HDL-Migration: " + command1 + "');" + newline + newline)
             if idtflag == 1:
@@ -2340,21 +2455,24 @@ def form_load_table_bfilesequential(tablename, conn, path_to_copy,parl):
         command2 = ""
         filelst = []
         for i in l:
+            col_name = '\"' + i[0] + '\"'  # manually add double quotes
             if i[1] == 'long varchar' :
-                filelst.append( i[0] + " ASCII FILE (',') NULL('NULL')")
+                filelst.append( col_name + " ASCII FILE (',') NULL('NULL')")
             elif i[1] == 'long binary':
-                filelst.append( i[0] + " BINARY FILE (',') NULL('NULL')")
+                filelst.append( col_name + " BINARY FILE (',') NULL('NULL')")
             elif i[2] == 'Y':
-                filelst.append( i[0] + " NULL('NULL')")
+                filelst.append( col_name + " NULL('NULL')")
             else:
-                filelst.append( i[0] )
+                filelst.append( col_name )
 
         command2 = ','.join(map(str, filelst))
-        command = " " + command1 + "( " + command2 + " )"
-        f1.write(command)
+        command = command1 + "( " + command2 + " )"
+        # Wrapping LOAD in a BEGIN block
+        f1.write(newline + "BEGIN" + newline)
+        f1.write(tab + command + newline)
         cursor3.close()
-        tab = "     "
-        f1.write(newline + tab + "FROM" + " ")
+
+        f1.write(tab + tab + "FROM" + " ")
         filelst = list()
         l = list()
         if parl == 1:
@@ -2374,8 +2492,8 @@ def form_load_table_bfilesequential(tablename, conn, path_to_copy,parl):
         my_string = ','.join(map(str, filelst))
         f1.write(my_string )
 
-        f1.write(newline + tab + "escapes off quotes on")
-        f1.write(newline + tab + "row delimited by \'\\" + "n" "'"+";")
+        f1.write(newline + tab + tab + "escapes off quotes on")
+        f1.write(newline + tab + tab + "row delimited by \'\\" + "n" "'"+";")
 
         rowCountVerifyInHDL(tablename,path_to_copy,cntstmt,f1)
 
@@ -2400,7 +2518,7 @@ def size_query(ext,tableid):
 # and connection string from a list
 # This function is for 16.1 SP01 and 16.0 SP11 versions
 # The implementation is different since parallel extraction is not in above versions.
-def extract_single_sequential(q, connstr_port,total_table,batch,log_q,qSuccess,qFail,tables_count,fail_count):
+def extract_single_sequential(q, connstr_port,total_table,batch,log_q,tables_count,fail_count,file_write_lock):
     if log_q:
         qh = QueueHandler(log_q)
         logger = logging.getLogger()
@@ -2415,9 +2533,9 @@ def extract_single_sequential(q, connstr_port,total_table,batch,log_q,qSuccess,q
             tableName = splits[1]
             owner = splits[0]
             tableid = table_withsize[3]
+            strt = datetime.datetime.now()
             conn = pyodbc.connect(connectstr, timeout=0)
             cursor = conn.cursor()
-            strt = datetime.datetime.now()
             logging.info( "Starting extraction of table: %s.%s [tableID:%s] by : %s"%(owner,tableName,tableid,hostport))
             logging.info("%s"%(common.dividerline))
 
@@ -2442,6 +2560,7 @@ def extract_single_sequential(q, connstr_port,total_table,batch,log_q,qSuccess,q
             else:
                 cursor.execute("set temporary option temp_extract_directory = '%s'"%(npath))
             is_table_failed = False
+            last_fail_exp = None
             if count != 0:
                 if 'SAP IQ/16.0.' in version:
                     if platform.system() == "Windows" and npath.startswith("\\"):
@@ -2461,7 +2580,7 @@ def extract_single_sequential(q, connstr_port,total_table,batch,log_q,qSuccess,q
                         cursor.execute(text).fetchall()
                     except Exception as exp:
                         is_table_failed = True
-                        qFail.put((owner,tableName,tableid,exp))
+                        last_fail_exp = exp
 
                     for i in l2:
                         cursor.execute(i)
@@ -2471,16 +2590,15 @@ def extract_single_sequential(q, connstr_port,total_table,batch,log_q,qSuccess,q
                         text1 = bfile_select_stmt(table_withsize,conn,npath)
                     try:
                         cursor.execute(text1).fetchall()
-                        qSuccess.put((owner,table_withsize))
                     except Exception as exp:
                         is_table_failed = True
-                        qFail.put((owner,tableName,tableid,exp))
+                        last_fail_exp = exp
 
                 try:
                     form_load_table_bfilesequential(table_withsize, conn, npath,0 )
                 except Exception as exp:
                     is_table_failed = True
-                    qFail.put((owner,tableName,tableid,exp))
+                    last_fail_exp = exp
 
             else:
                 l1 ,l2 = size_query('inp',tableid)
@@ -2501,10 +2619,9 @@ def extract_single_sequential(q, connstr_port,total_table,batch,log_q,qSuccess,q
                 select_query = """Select %s FROM "%s"."%s";"""%(column_string,owner,tableName)
                 try:
                     cursor.execute(select_query).fetchall()
-                    qSuccess.put((owner,table_withsize))
                 except Exception as exp:
                     is_table_failed = True
-                    qFail.put((owner,tableName,tableid,exp))
+                    last_fail_exp = exp
 
                 for i in l2:
                     cursor.execute(i)
@@ -2514,32 +2631,30 @@ def extract_single_sequential(q, connstr_port,total_table,batch,log_q,qSuccess,q
                     form_load_table_sequential(table_withsize, conn, npath, 1)
                 except Exception as exp:
                     is_table_failed = True
-                    qFail.put((owner,tableName,tableid,exp))
+                    last_fail_exp = exp
 
-            lock.acquire()
-            try:
+            with lock:
                 PATH = '%s%s%s%s%s_1.inp'%(datapath,path_sep,tableid,path_sep,tableid)
                 PATH1 = '%s%s%s%s%s_1.txt'%(datapath,path_sep,tableid,path_sep,tableid)
 
                 if (((os.path.isfile(PATH)) or (os.path.isfile(PATH1))) and is_table_failed == False):
-                    updateUnloadStatus(qSuccess,batch,total_table,tables_count,fail_count,file_write_lock)
+                    updateUnloadStatus(owner, table_withsize, batch, total_table, tables_count, fail_count, file_write_lock)
                 if is_table_failed :
-                    updateFailureStatus(qFail,batch,total_table,tables_count,fail_count,file_write_lock)
-            finally:
-                lock.release() #release lock
+                    updateFailureStatus(owner, tableName, tableid, last_fail_exp, batch, total_table, tables_count, fail_count, file_write_lock)
 
             elap_sec = common.elap_time(strt)
             days, hours, minutes, seconds = common.calculate_time(elap_sec)
 
-            logging.info("Time taken to unload table: %s [tableID:%s] is : \n%d days, %d hours, %d minutes and %d seconds" % (table_withsize[0], tableid, days[0], hours[0], minutes[0], seconds[0]))
+            logging.info("Time taken to unload table: %s.%s [tableID:%s] by %s : %d days, %d hours, %d minutes and %.2f seconds (total: %.3f sec)" % (owner, tableName, tableid, hostport, days[0], hours[0], minutes[0], seconds[0], elap_sec))
             logging.info("%s\n"%(common.dividerline))
             cursor.close()
             conn.close()
         except Exception as exp:
             if str(exp) != "":
                 logging.error("Unexpected error reported in extract_single_sequential() while extracting data: \n%s"%str(exp))
-                updateFailureStatus(qFail,batch,total_table,tables_count,fail_count,file_write_lock)
+                updateFailureStatus(owner, tableName, tableid, exp, batch, total_table, tables_count, fail_count, file_write_lock)
             else:
+                logging.warning("Empty exception caught in extract_single_sequential() - queue may be exhausted")
                 return
 
 # Function to form connect strings for each node based on
@@ -2592,12 +2707,7 @@ def display_clicopy_command(batch):
     logging.info("%s"%(common.double_divider_line))
     logging.info("Next Steps:%s%s1. Copy data on Object store."%(newline,newline))
     logging.info("%sSample command to copy the data on data lake Files object store:"%(newline))
-    if is_windows:
-        copy_cmd = "hdlfscli -cert %s -key %s -s %s upload %s /%s -log"%(common.hdlfs_cert_path, common.hdlfs_key_path, common.hdlfs_files_endpoint, migrationpath, common.hdlfs_directory)
-        logging.info("%s%s "%(newline,copy_cmd))
-        logging.info("NOTE: Due to a known HDLFS limitation, the hdlfscli utility does not support copying data file larger than 95 GB. At present, no official workaround exists but an alternate solution is in progress.")
-    else:
-        logging.info("%spython3 copy_hdlfs.py --config_file <migration config file path>"%newline)
+    logging.info("%spython3 copy_hdlfs.py --config_file <migration config file path>"%newline)
     logging.info("%s"%(common.double_divider_line))
     batches_count = count_batches_generated_failed()
     if batch == 0 or batch == batches_count:
@@ -2609,7 +2719,7 @@ def display_clicopy_command(batch):
                 logging.info("%spython3 load_schema_and_data.py --config_file <config file path> --onlydata y"%newline)
             if fullextraction == 'y':
                 logging.info("%sSample command to run load utility for schema and data load :"%newline)
-                logging.info("%spython3 load_schema_and_data.py --config_file <config file path> --fullload y"%newline) 
+                logging.info("%spython3 load_schema_and_data.py --config_file <config file path> --fullload y"%newline)
             logging.info("%s"%(common.double_divider_line))
         elif os.path.isfile('%s%sno_extraction.list'%(migrationpath,path_sep)) and failure_backup_count == 0:
             common.print_and_log(no_extraction_warning_msg)
@@ -2630,7 +2740,7 @@ def extracted_tables_count(f):
     if not os.path.isfile(extractedTables_out):
         table_cnt = 0
     else:
-        with codecs.open(f, "r", common.charset) as f:
+        with open(f, "r", encoding=common.get_valid_encoding(common.charset)) as f:
             for line in f.readlines():
                 line = line.rstrip(newline)
                 splits = line.split(',')
@@ -2646,7 +2756,7 @@ def extracted_tables_count(f):
 # f1 :iqtables_list, f2 : extractedTables_out and f3 : extractedFailures_err
 def check_migration_status(f1,f2,f3,batch):
     iqtableslist = list()
-    with codecs.open(f1, "r", common.charset) as f:
+    with open(f1, "r", encoding=common.get_valid_encoding(common.charset)) as f:
         for line in f.readlines():
             line = line.rstrip(newline)
             splits = line.split(',')
@@ -2665,7 +2775,7 @@ def check_migration_status(f1,f2,f3,batch):
     else:
         extractedtablelist = list()
 
-        with codecs.open(f2, "r", common.charset) as f:
+        with open(f2, "r", encoding=common.get_valid_encoding(common.charset)) as f:
             for line in f.readlines():
                 line = line.rstrip(newline)
                 splits = line.split(',')
@@ -2711,7 +2821,7 @@ def get_byteorder():
 # At the end it will also check if all tables are extracted or not
 def extract_main(batch):
 
-    global q_listener, log_q, logger
+    global listener_q, log_q, logger
     if not is_windows:
         log_q = None
 
@@ -2722,9 +2832,6 @@ def extract_main(batch):
         print("For unload progress of tables, please check file : %s%s" % (newline, migration_log))
 
     start = datetime.datetime.now()
-
-    qSuccess = multiprocessing.Queue()
-    qFail = multiprocessing.Queue()
     file_write_lock = multiprocessing.Lock()
     connect_list(connectstr)
 
@@ -2741,21 +2848,32 @@ def extract_main(batch):
     restart_counts = {}  # Track restarts for each conn_info
     RESTART_LIMIT = 3    # Max restarts allowed per connection
 
+    nodesqueue_list = []  # Track all queues for proper cleanup
     for i in range(nodes_count):
         node_connect_list = connection_list[i]
         node_extract_list = extract_list[i]
         nodesqueue = multiprocessing.Queue()
+        nodesqueue_list.append(nodesqueue)  # Store reference for cleanup
+        logging.info("%s"%(common.dividerline))
+        logging.info("Node %s: %s tables queued for extraction"%(i, len(node_extract_list)))
         for item in node_extract_list:
+            logging.info("Queuing table for extraction on node %s: %s [tableID:%s, rowcount:%s]"%(i, item[0], item[3], item[1]))
             nodesqueue.put(item)
 
         node_processes = []
 
         def start_worker(conn_info):
+            # Use default multiprocessing context (already set to spawn globally)
             p = multiprocessing.Process(
                 target=extract_fun,
-                args=(nodesqueue, conn_info, total_table, batch, log_q, qSuccess, qFail, tables_count, fail_count, file_write_lock)
+                args=(nodesqueue, conn_info, total_table, batch, log_q, tables_count, fail_count, file_write_lock)
             )
-            p.start()
+            p.daemon = False
+            try:
+                p.start()
+            except Exception as e:
+                logging.error(f"Failed to start worker process for host {conn_info[1]}: {str(e)}")
+                raise
             return p
 
         for conn_info in node_connect_list:
@@ -2772,16 +2890,17 @@ def extract_main(batch):
                 if not proc.is_alive():
                     if nodesqueue.qsize() > 0:
                         if restart_counts[conn_info] < RESTART_LIMIT:
-                            logging.warning(f"Restarting dead process for {conn_info} (attempt {restart_counts[conn_info] + 1})")
+                            logging.warning(f"Restarting dead process for host {conn_info[1]} (attempt {restart_counts[conn_info] + 1})")
                             new_proc = multiprocessing.Process(
-                                target=extract_fun,
-                                args=(nodesqueue, conn_info, total_table, batch, log_q, qSuccess, qFail, tables_count, fail_count, file_write_lock)
+                                 target=extract_fun,
+                                 args=(nodesqueue, conn_info, total_table, batch, log_q, tables_count, fail_count, file_write_lock)
                             )
+                            new_proc.daemon = False
                             new_proc.start()
                             node_processes[idx] = (new_proc, conn_info)
                             restart_counts[conn_info] += 1
                         else:
-                            logging.error(f"Restart limit exceeded for connection: {conn_info}. No further restart attempts.")
+                            logging.error(f"Restart limit exceeded for host: {conn_info[1]}. No further restart attempts.")
         time.sleep(5)
 
     # Ensure all processes have completed
@@ -2789,6 +2908,18 @@ def extract_main(batch):
         for proc, _ in node_processes:
             proc.join()
 
+    # Flush remaining log records by stopping the QueueListener (sends sentinel and joins handler thread)
+    if is_windows and listener_q:
+        listener_q.stop()
+        listener_q = None
+
+    # Close all node queues
+    for nodesqueue in nodesqueue_list:
+        try:
+            nodesqueue.close()
+            nodesqueue.join_thread()
+        except Exception as e:
+            logging.debug(f"Error closing nodesqueue: {e}")
 
     total_elap_sec = common.elap_time(start)
     days, hours, minutes, seconds = common.calculate_time(total_elap_sec)
@@ -2802,7 +2933,7 @@ def extract_main(batch):
     table_cnt = extracted_tables_count(extractedTables_out)
     str1 = "Total number of unloaded tables = %s"%table_cnt
     common.print_and_log(str1)
-    logging.info("Total Time taken in data unload : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0]))
+    logging.info("Total Time taken in data unload : %s%d days, %d hours, %d minutes and %.2f seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0]))
     logging.info("%s"%(common.dividerline))
 
     if batch != 0:
@@ -2841,7 +2972,7 @@ def count_failure_backup_files():
 def max_size_of_no_extraction_list():
     table_no_unloaded = []
 
-    no_extract_file = codecs.open(no_extraction_file,'r', common.charset)
+    no_extract_file = open(no_extraction_file,'r', encoding=common.get_valid_encoding(common.charset))
     lines = no_extract_file.readlines()
     for line in lines:
         line = line.rstrip(newline)
@@ -2918,10 +3049,7 @@ def extracted_batch_file_exist():
 
                      else:
                          str1 = "%sAll the batches have been completed and summary is generated. %sDo you want to create new batches for failed tables or no_extracted tables or both if exists? Enter Y/N :"%(newline,newline)
-                         if(sys.version[0:2] == '2.'):
-                             val = str(raw_input(str1))
-                         else:
-                             val = str(input(str1))
+                         val = str(input(str1))
                          if val.lower() == "y":
                              failure_and_noextraction_file_batches()
                              count = count_batches_generated()
@@ -2951,10 +3079,7 @@ def extracted_batch_file_exist():
                      str1 = "%sLast batch = %s has some failures as %s file exists.%sDo you want to %sY - Resume(Existing batch will run in resume mode) %sN - Proceed to exit batch extraction? (Y/N): "%(newline,batch,extractedFailures_err_batch,newline,newline,newline)
                  else:
                      str1 = "%sPrevious batch = %s has some failures as %s file exists.%sDo you want to %sY - Resume(Existing batch will run in resume mode) %sN - Proceed to next batch extraction? (Y/N): "%(newline,batch,extractedFailures_err_batch,newline,newline,newline)
-                 if(sys.version[0:2] == '2.'):
-                     val = str(raw_input(str1))
-                 else:
-                     val = str(input(str1))
+                 val = str(input(str1))
                  if val.lower() == "y":
                      str1 = "%sStarted extraction of batch = %s in resume mode"%(newline,batch)
                      common.print_and_log(str1)
@@ -2990,10 +3115,7 @@ def current_batch_extraction(batch,count):
     # We should not ask for this input when migration utility is running for restart mode, since it is first time, hence this condition
     if resume == True and batch > 1:
         str1 = "%sPrevious batch = %s has been completed.%sPlease copy all the contents of Migration_Data folder to object store before proceeding.If data has been successfully copied,%sEnter Y - Yes or N - No: "%(newline,batch-1,newline,newline)
-        if(sys.version[0:2] == '2.'):
-            val = str(raw_input(str1))
-        else:
-            val = str(input(str1))
+        val = str(input(str1))
         if val.lower() == "y":
             str2 = "%sData has been successfully copied to object store. Started extraction of batch = %s "%(newline,batch)
             common.print_and_log(str2)
@@ -3035,13 +3157,13 @@ def combine_extracted_output(count):
     while batchnum  <= count:
         extractedTables_out_btch="%s%sExtractedTables_Batch_%s.out"%(migrationpath,path_sep,batchnum)
         if os.path.isfile(extractedTables_out_btch):
-            with codecs.open("%s"%(extractedTables_out_btch), "r", common.charset) as f:
+            with open(extractedTables_out_btch, "r", encoding=common.get_valid_encoding(common.charset)) as f:
                 for line in f.readlines():
                     batches_extracted_list.append(line)
 
         batchnum = batchnum + 1
 
-    with codecs.open("%s"%(combine_extractedTables_out), "w", common.charset) as f:
+    with open(combine_extractedTables_out, "w", encoding=common.get_valid_encoding(common.charset)) as f:
         for line in batches_extracted_list:
             f.write(line)
 
@@ -3054,7 +3176,7 @@ def failure_and_noextraction_file_batches():
     # Get all the table names into a list
     original_iq_tablelist = []
 
-    extract_file = codecs.open(extractedTables_out,'r', common.charset)
+    extract_file = open(extractedTables_out,'r', encoding=common.get_valid_encoding(common.charset))
     lines = extract_file.readlines()
     for line in lines:
         line = line.rstrip(newline)
@@ -3062,7 +3184,7 @@ def failure_and_noextraction_file_batches():
         table_already_unloaded.append(splits[0])
     extract_file.close()
 
-    iqtable_file = codecs.open(iqtables_list,'r', common.charset)
+    iqtable_file = open(iqtables_list,'r', encoding=common.get_valid_encoding(common.charset))
     lines = iqtable_file.readlines()
     for line in lines:
         line = line.rstrip(newline)
@@ -3172,7 +3294,7 @@ if __name__ == '__main__':
     print("%s"%(common.dividerline))
     print("Migration path : %s%s"%(newline,migrationpath))
     print("%s"%(common.dividerline))
-    if fullextraction == 'y' or onlydata == 'y' :  
+    if fullextraction == 'y' or onlydata == 'y' :
        print("Data Extraction path : %s%s"%(newline,datapath))
        print("%s"%(common.dividerline))
     print("Migration Utility completed. %sPlease check file for details :%s%s"%(newline,newline,migration_log))
@@ -3185,7 +3307,14 @@ if __name__ == '__main__':
         logging.info("%sSample command to run load utility for schema load :"%newline)
         logging.info("%spython3 load_schema_and_data.py --config_file <config file path> --onlyschema y"%newline)
         logging.info("%s"%(common.double_divider_line))
-    logging.info("Total Time taken in migration utility : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0]))
-    print("Total Time taken in migration utility : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0]))
+    logging.info("Total Time taken in migration utility : %s%d days, %d hours, %d minutes and %.2f seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0]))
+    print("Total Time taken in migration utility : %s%d days, %d hours, %d minutes and %.2f seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0]))
     logging.info("%s"%(common.dividerline))
     print("%s"%(common.dividerline))
+
+    # Properly close the QueueListener to clean up resources
+    try:
+        if listener_q:
+            listener_q.stop()
+    except Exception as e:
+        logging.debug(f"Error stopping QueueListener: {e}")

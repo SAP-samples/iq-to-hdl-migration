@@ -8,7 +8,6 @@
 # Copyright (c) 2021 SAP SE or an SAP affiliate company. All rights reserved.
 # ***************************************************************************
 import sys, getopt
-import socket
 import getpass
 import stat
 import os
@@ -29,16 +28,21 @@ import logging
 import codecs
 import sqlanydb
 import json, urllib3
+import tempfile
+import atexit
 from logging.handlers import QueueHandler, QueueListener
+
+if sys.version_info < (3, 11):
+    sys.exit("Error: Python 3.11 or higher is required. Current version: %s" % sys.version)
 
 try:
    import requests
 except:
    requests = None
 
-argv = sys.argv[1:]
-# total arguments passed
-n = len(sys.argv)
+# On Windows with multiprocessing 'spawn', child processes re-import this module.
+# Guard argument parsing so child processes don't crash from sys.exit() calls.
+_is_child_process = (multiprocessing.parent_process() is not None)
 
 # Defaults
 config_file = ''
@@ -46,9 +50,22 @@ onlyschema = 'n'
 onlydata = 'n'
 fullload = 'n'
 
-# Handle help first
-if '-h' in argv or '--help' in argv:
-    print('''
+if _is_child_process:
+    # Child process (Windows spawn): read config from environment set by parent
+    config_file = os.environ.get('_LOAD_CONFIG_FILE', '')
+    onlyschema = os.environ.get('_LOAD_ONLYSCHEMA', 'n')
+    onlydata = os.environ.get('_LOAD_ONLYDATA', 'n')
+    fullload = os.environ.get('_LOAD_FULLLOAD', 'n')
+    if not config_file:
+        raise RuntimeError("Child process missing _LOAD_CONFIG_FILE env var")
+else:
+    argv = sys.argv[1:]
+    # total arguments passed
+    n = len(sys.argv)
+
+    # Handle help first
+    if '-h' in argv or '--help' in argv:
+        print('''
 Usage:
     load_schema_and_data.py --config_file <config file path> [--onlyschema y] [--onlydata y] [--fullload y]
 Same as:
@@ -64,47 +81,53 @@ Note:
     Only one of --onlyschema, --onlydata, or --fullload can be 'y'. They are mutually exclusive.
     One of the three options must be provided and set to 'y'.
         ''')
-    sys.exit()
+        sys.exit()
 
-# Validate for incorrect short forms like -onlyschema etc.
-for arg in argv:
-    if arg.startswith('-') and not arg.startswith('--'):
-        if arg not in ['-h', '-f', '-s', '-d', '-e']:
-            print(f"Error: Unsupported or incorrectly formatted option '{arg}'. Use proper short or long options.")
-            sys.exit(2)
+    # Validate for incorrect short forms like -onlyschema etc.
+    for arg in argv:
+        if arg.startswith('-') and not arg.startswith('--'):
+            if arg not in ['-h', '-f', '-s', '-d', '-e']:
+                print(f"Error: Unsupported or incorrectly formatted option '{arg}'. Use proper short or long options.")
+                sys.exit(2)
 
-try:
-    opts, args = getopt.getopt(argv, "hf:s:d:e:", ["help", "config_file=", "onlyschema=", "onlydata=", "fullload="])
-except getopt.GetoptError:
-    print("Error : Unsupported option/values. Run load_schema_and_data.py -h or --help for help")
-    sys.exit(2)
+    try:
+        opts, args = getopt.getopt(argv, "hf:s:d:e:", ["help", "config_file=", "onlyschema=", "onlydata=", "fullload="])
+    except getopt.GetoptError:
+        print("Error : Unsupported option/values. Run load_schema_and_data.py -h or --help for help")
+        sys.exit(2)
 
-for opt, arg in opts:
-    if opt in ("-f", "--config_file"):
-        config_file = arg
-    elif opt in ("-s", "--onlyschema"):
-        if arg.lower() != 'y':
-            sys.exit("Error: --onlyschema or -s only supports 'y'. Use this option only if you want to load only schema.")
-        onlyschema = arg.lower()
-    elif opt in ("-d", "--onlydata"):
-        if arg.lower() != 'y':
-            sys.exit("Error: --onlydata or -d only supports 'y'. Use this option only if you want to load only data.")
-        onlydata = arg.lower()
-    elif opt in ("-e", "--fullload"):
-        if arg.lower() != 'y':
-            sys.exit("Error: --fullload or -e only supports 'y'. Use this option only if you want to load both schema and data.")
-        fullload = arg.lower()
+    for opt, arg in opts:
+        if opt in ("-f", "--config_file"):
+            config_file = arg
+        elif opt in ("-s", "--onlyschema"):
+            if arg.lower() != 'y':
+                sys.exit("Error: --onlyschema or -s only supports 'y'. Use this option only if you want to load only schema.")
+            onlyschema = arg.lower()
+        elif opt in ("-d", "--onlydata"):
+            if arg.lower() != 'y':
+                sys.exit("Error: --onlydata or -d only supports 'y'. Use this option only if you want to load only data.")
+            onlydata = arg.lower()
+        elif opt in ("-e", "--fullload"):
+            if arg.lower() != 'y':
+                sys.exit("Error: --fullload or -e only supports 'y'. Use this option only if you want to load both schema and data.")
+            fullload = arg.lower()
 
-# Check if config_file is provided
-if config_file.strip() == '':
-    sys.exit("Error: --config_file or -f is a mandatory option. Please specify a valid config file path.")
+    # Check if config_file is provided
+    if config_file.strip() == '':
+        sys.exit("Error: --config_file or -f is a mandatory option. Please specify a valid config file path.")
 
-# Validation for mutual exclusivity
-flags = [onlyschema == 'y', onlydata == 'y', fullload == 'y']
-if flags.count(True) > 1:
-    sys.exit("Error: --onlyschema, --onlydata, and --fullload are mutually exclusive. Only one can be 'y'. Run load_schema_and_data.py -h or --help for help.")
-elif flags.count(True) == 0:
-    sys.exit("Error: One of --onlyschema, --onlydata, or --fullload must be 'y'. Run load_schema_and_data.py -h or --help for help.")
+    # Validation for mutual exclusivity
+    flags = [onlyschema == 'y', onlydata == 'y', fullload == 'y']
+    if flags.count(True) > 1:
+        sys.exit("Error: --onlyschema, --onlydata, and --fullload are mutually exclusive. Only one can be 'y'. Run load_schema_and_data.py -h or --help for help.")
+    elif flags.count(True) == 0:
+        sys.exit("Error: One of --onlyschema, --onlydata, or --fullload must be 'y'. Run load_schema_and_data.py -h or --help for help.")
+
+    # Set environment variables so spawned child processes can access config
+    os.environ['_LOAD_CONFIG_FILE'] = config_file
+    os.environ['_LOAD_ONLYSCHEMA'] = onlyschema
+    os.environ['_LOAD_ONLYDATA'] = onlydata
+    os.environ['_LOAD_FULLLOAD'] = fullload
 
 # detect the current working directory and print it
 path = os.getcwd()
@@ -122,7 +145,39 @@ else:
 
 sys.path.insert(0, '%s%s..%sCommon%s'%(path,path_sep,path_sep,path_sep))
 import common
+if _is_child_process:
+    # Read password from a temporary credential file (not from env var, to avoid plaintext exposure).
+    # Do NOT delete the file here — multiple spawn children may need to read it.
+    # The parent registers an atexit handler to clean it up.
+    _pwd_file = os.environ.get('_LOAD_HDLADMIN_PWD_FILE', '')
+    if _pwd_file and os.path.isfile(_pwd_file):
+        try:
+            with open(_pwd_file, 'r') as _f:
+                _pwd = _f.read()
+        except OSError:
+            _pwd = ''
+    else:
+        _pwd = ''
+    if _pwd:
+        common._child_pwd = _pwd
 common.load_inputs(config_file,'load_schema_and_data')
+if not _is_child_process:
+    # Write password to a temp file with restrictive permissions for child processes.
+    # Avoid storing passwords in environment variables where they are visible via /proc/<pid>/environ.
+    _fd, _pwd_path = tempfile.mkstemp(prefix='load_cred_', suffix='.tmp')
+    try:
+        os.write(_fd, common.password.encode('utf-8'))
+    finally:
+        os.close(_fd)
+    if not is_windows:
+        os.chmod(_pwd_path, 0o600)
+    os.environ['_LOAD_HDLADMIN_PWD_FILE'] = _pwd_path
+    def _cleanup_pwd_file():
+        try:
+            os.unlink(_pwd_path)
+        except OSError:
+            pass
+    atexit.register(_cleanup_pwd_file)
 global migrationpath
 migrationpath = "%s%sMigration_Data"%(common.extract_path,path_sep)
 global extractedTables_out
@@ -137,6 +192,12 @@ loadFailure_err_bkp = "%s%sHDL_LoadFailure_bkp.err"%(reload_file_location,path_s
 global HDLLoad_out
 HDLLoad_out = "%s%sHDL_LoadedTables.out"%(reload_file_location,path_sep)
 load_schema_and_data_log = "%s%sload_schema_and_data.log"%(path,path_sep)
+
+# Use fork on Linux (default) so child processes inherit all parent state (globals, logging, etc.)
+# Use spawn on Windows where fork is not available
+if is_windows:
+    multiprocessing.set_start_method('spawn', force=True)
+
 lock = multiprocessing.Lock()
 tables_count = multiprocessing.Value(ctypes.c_int, 0)
 fail_count = multiprocessing.Value(ctypes.c_int, 0)
@@ -196,6 +257,12 @@ def get_inputs(config_file):
 
     logging.info("%s"%(common.dividerline))
     logging.info("Data Lake Relational Engine common.charset: %s"%common.charset)
+    if common.charset.upper() == "CESU-8":
+        str1 = "Warning: Python has no codec for charset '%s'. Falling back to surrogate-safe UTF-8 for internal file encoding."%common.charset
+        common.print_and_log(str1)
+    elif common.charset.upper() in ('EUC_TAIWAN', 'EUC-TW'):
+        str1 = "Warning: Python has no codec for charset '%s'. Using latin-1 passthrough for schema files and UTF-8 for internal files."%common.charset
+        common.print_and_log(str1)
 
 # Initialize logger with handler and queue the records and send them to handler
 # This function is applicable only for Windows OS as
@@ -243,7 +310,7 @@ def validate_dir_and_files():
     if not os.path.isfile(AutoUpdated_Reload_file):
         sys.exit("Error: %s file does not exist"%(AutoUpdated_Reload_file))
     else:
-        with codecs.open(AutoUpdated_Reload_file, "r", common.charset) as f:
+        with open(AutoUpdated_Reload_file, "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
             if ('Creation of AutoUpdated_Reload.sql completed.' not in f.read()):
                 sys.exit("Error: %s file is not complete. SAP recommends to re-run the migration utility."%(AutoUpdated_Reload_file))
             f.close()
@@ -266,7 +333,7 @@ def validate_dir_and_files_onlyschema():
     if not os.path.isfile(AutoUpdated_Reload_file):
         sys.exit("Error: %s file does not exist"%(AutoUpdated_Reload_file))
     else:
-        with codecs.open(AutoUpdated_Reload_file, "r", common.charset) as f:
+        with open(AutoUpdated_Reload_file, "r", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
             if ('Creation of AutoUpdated_Reload.sql completed.' not in f.read()):
                 sys.exit("Error: %s file is not complete. SAP recommends to re-run the migration utility."%(AutoUpdated_Reload_file))
             f.close()
@@ -274,30 +341,35 @@ def validate_dir_and_files_onlyschema():
 #Function to load schema on HDL
 def load_schema(schema_flag):
     #set permission to run shell scripts
-    os.chmod("./load_schema.sh", stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-    os.chmod("./load_table.sh", stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    if not is_windows:
+        os.chmod("./load_schema.sh", stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        os.chmod("./load_table.sh", stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
     if schema_flag == 1:
         str1 = "Schema load on data lake Relational Engine started."
-        str2 = "Schema load on data lake Relational Engine complete."
+        str2 = "Schema load on data lake Relational Engine completed."
         errmsg = "Error: Schema load failed."
         file1 = "Schema load"
         file2 = "%sAutoUpdated_Reload.sql"%(path_sep)
 
     common.print_and_log(str1)
     if is_windows:
-        conn_log_file="%s%sHDL_LoadSchema_conn.log"%(reload_file_location,path_sep)
-        log_file="%s%sHDL_LoadSchema.log"%(reload_file_location,path_sep)
-        with codecs.open(log_file, "a", 'utf-16') as f:
+        conn_log_file = "%s%sHDL_LoadSchema_conn.log" % (reload_file_location, path_sep)
+        log_file = "%s%sHDL_LoadSchema.log" % (reload_file_location, path_sep)
+
+        # Use absolute path and handle the encoding explicitly
+        sql_file_path = "%s%s"%(reload_file_location, file2)
+        with open(log_file, "a", encoding='utf-16') as f:
             f.write("%s%s"%(newline,common.dividerline))
             f.write("%s%s log"%(newline,file1))
             f.write("%s%s%s"%(newline,common.dividerline,newline))
-        command="""dbisql  -nogui  -c 'uid=%s;pwd=%s;host=%s;ENC=tls(fips=NO;tls_type=rsa;skip_certificate_name_check=1; direct=yes;);log=%s' READ ENCODING "'%s'" %s%s%s -onerror continue >> %s"""%(common.user,common.password, common.coord_host,conn_log_file,common.charset,reload_file_location,path_sep,file2,log_file)
+
+
+        command="""dbisql  -nogui  -c 'uid=%s;pwd=%s;host=%s;ENC=tls(fips=NO;tls_type=rsa;skip_certificate_name_check=1; direct=yes;);log=%s' READ ENCODING "'%s'" %s -onerror continue >> %s"""%(common.user,common.password, common.coord_host,conn_log_file,common.charset,sql_file_path,log_file)
         output=subprocess.call(['powershell','-command',command ])
     else:
         #Run "./load.sh" to reload the table schema
         output=subprocess.call(['bash', 'load_schema.sh', common.user, common.password, common.coord_host, reload_file_location, common.Datalake_Client_Install_Path, file1, file2, common.charset ])
-
 
     if output == 0:
         common.print_and_log(str2)
@@ -318,11 +390,11 @@ def check_schema_load_required():
     if is_windows:
         enc='utf-16'
     else:
-        enc=common.charset
+        enc = common.get_valid_encoding(common.charset)
     load_schema_output_file="%s%sHDL_LoadSchema.log"%(reload_file_location,path_sep)
     if (os.path.isfile(load_schema_output_file)):
 
-        f=codecs.open(load_schema_output_file,'r', enc)
+        f=open(load_schema_output_file,'r', encoding=enc)
         lines = f.readlines()
         for line in reversed(lines):
             if("Schema load log" in line.strip()):
@@ -335,6 +407,7 @@ def check_schema_load_required():
         elif len(lines) <= 5:
         # File only contains header or insufficient information
             schema_load_needed = True
+        f.close()
     else :
         schema_load_needed = True
     return schema_load_needed
@@ -359,7 +432,7 @@ def validate_upload_hdlfs(tableid):
     endpoint = common.hdlfs_files_endpoint
     url="https://%s/webhdfs/v1/" %endpoint
 
- 
+
     container = endpoint.split('.files.')[0]
     headers={
         'x-sap-filecontainer':container,
@@ -443,15 +516,15 @@ def load_table(host_name, table, tableid, already_processed, expected_rowcount):
     if is_loaded_successfully:
         status="OK"
     else:
-        command="""dbisql  -nogui  -c 'uid=%s;pwd=%s;host=%s;ENC=tls(fips=NO;tls_type=rsa;skip_certificate_name_check=1; direct=yes;);log=%s' READ ENCODING "'%s'" %s -onerror exit >%s 2>>%s"""%(common.user, common.password, host_name,conn_log_file,common.charset,sql_file,out_file,err_file)
+        command="""dbisql  -nogui  -c 'uid=%s;pwd=%s;host=%s;ENC=tls(fips=NO;tls_type=rsa;skip_certificate_name_check=1; direct=yes;);log=%s' READ ENCODING "'%s'" %s -onerror exit >%s 2>>%s"""%(common.user, common.password, host_name,conn_log_file,common.get_data_file_encoding(),sql_file,out_file,err_file)
         output=subprocess.call(['powershell','-command',command ])
 
-        f=codecs.open(out_file,'r', 'utf-16')
+        f=open(out_file,'r', encoding='utf-16')
         lines = f.readlines()
         f.close()
         for line in lines:
             if "Error: For table" in line:
-                with codecs.open(err_file, "a+", common.charset) as f:
+                with open(err_file, "a+", encoding=common.get_valid_encoding(common.charset), errors="replace") as f:
                     f.write(line + newline)
                 f.close()
                 row_missmatch=1
@@ -473,52 +546,42 @@ def load_table(host_name, table, tableid, already_processed, expected_rowcount):
 
     return status,row_count
 
-#Function to track status of tables loaded successfuly
-def updateLoadStatus(qSuccess,total_table,tables_count,fail_count,file_write_lock):
+#Function to track status of tables loaded successfully
+# Writes directly to file under lock - no queue drain pattern to avoid race conditions
+def updateLoadStatus(tableName, tableid, load_rowcount, total_table, tables_count, fail_count, file_write_lock):
     with file_write_lock:
-        with codecs.open(HDLLoad_out, "a",common.charset) as f:
-            while True:
-                try:
-                    tableName,tableid,load_rowcount= qSuccess.get_nowait()
-                    f.write("%s,%s,%s%s"%(tableName,tableid,load_rowcount,newline))
-                    logging.info( "Adding entry in %s file %sfor table : %s [tableID:%s]"%(HDLLoad_out,newline,tableName,tableid))
-                    f.flush()
-                    tables_count.value = tables_count.value + 1
-                    progressBar(tables_count,fail_count,total_table)
-                    if total_table.value == tables_count.value + fail_count.value:
-                        break
-                except Exception as exp:
-                    break
-        f.close()
+        with open(HDLLoad_out, "a", encoding=common.get_valid_encoding(common.charset)) as f:
+            f.write("%s,%s,%s%s"%(tableName,tableid,load_rowcount,newline))
+            f.flush()
+        logging.info( "Adding entry in %s file %sfor table : %s [tableID:%s]"%(HDLLoad_out,newline,tableName,tableid))
+        tables_count.value = tables_count.value + 1
+        progressBar(tables_count,fail_count,total_table)
 
 #Function to track status of tables failed to load
-def updateFailureStatus(qFail,total_table,tables_count,fail_count,file_write_lock):
+# Writes directly to file under lock - no queue drain pattern to avoid race conditions
+def updateFailureStatus(tableName, tableid, expected_rowcount, exp, total_table, tables_count, fail_count, file_write_lock):
     with file_write_lock:
-        with codecs.open(loadFailure_err, "a+", common.charset) as f:
-            while True:
-                try:
-                    tableName,tableid,exp= qFail.get_nowait()
-                    if not tableName in f.read():
-                        if exp:
-                            f.write( "%s,%s:%s%s"%(tableName,tableid,str(exp),newline))
-                        else:
-                            f.write( "%s,%s%s"%(tableName,tableid,newline))
-                    logging.info("Adding entry in %s file %sfor table : %s [tableID:%s] "%(loadFailure_err,newline,tableName,tableid))
-                    f.flush()
-                    fail_count.value = fail_count.value + 1
-                    progressBar(tables_count,fail_count,total_table)
-                    if total_table.value == tables_count.value + fail_count.value:
-                        break
-                except Exception as exp:
-                    break
-        f.close()
+        with open(loadFailure_err, "a+", encoding=common.get_valid_encoding(common.charset)) as f:
+            # Read existing content to check for duplicate entries
+            f.seek(0)
+            existing_content = f.read()
+            # Only write if table name not already recorded (prevent duplicates)
+            if tableName not in existing_content:
+                if exp:
+                    f.write( "%s,%s,%s:%s%s"%(tableName,tableid,expected_rowcount,str(exp),newline))
+                else:
+                    f.write( "%s,%s,%s%s"%(tableName,tableid,expected_rowcount,newline))
+            f.flush()
+        logging.info("Adding entry in %s file %sfor table : %s [tableID:%s] "%(loadFailure_err,newline,tableName,tableid))
+        fail_count.value = fail_count.value + 1
+        progressBar(tables_count,fail_count,total_table)
 
 # Function to load data for tables in multiprocessing queue by host from hostname list
 # I/P parameters:
 # q1 = multiprocessing queue of tables to be loaded
 # hostname = Host by which tables will be loaded
 # already_processed = flag indicating already processed tables for load
-def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,tables_count,fail_count,file_write_lock):
+def load_single( q1,hostname,already_processed,total_table,log_q,tables_count,fail_count,file_write_lock):
     if log_q:
         qh = QueueHandler(log_q)
         logger = logging.getLogger()
@@ -532,10 +595,15 @@ def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,
             tableid = table_with_tid[1]
             host_name = hostname[0]
             expected_rowcount = table_with_tid[2]
-            if common.Object_Store_Copy_Validation.lower() == 'yes':
-                upload_success = validate_upload_hdlfs(tableid)
-            else:
-                upload_success = True
+            try:
+               if common.Object_Store_Copy_Validation.lower() == 'yes':
+                   upload_success = validate_upload_hdlfs(tableid)
+               else:
+                   upload_success = True
+            except Exception as e:
+                logging.error("Validation failed for %s : %s"%(tableName,str(e)))
+                logging.info("%s"%newline)
+                upload_success = False
 
             if(upload_success):
                 strt = datetime.datetime.now()
@@ -548,7 +616,7 @@ def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,
                         loadstatus = 1
                 else:
                     try:
-                        output=subprocess.check_output(['bash', 'load_table.sh', common.user, common.password, host_name,  reload_file_location, tableName, common.Datalake_Client_Install_Path, tableid, common.charset, str(already_processed), expected_rowcount] )
+                        output=subprocess.check_output(['bash', 'load_table.sh', common.user, common.password, host_name,  reload_file_location, tableName, common.Datalake_Client_Install_Path, tableid, common.get_data_file_encoding(), str(already_processed), expected_rowcount] )
                     except subprocess.CalledProcessError as loadTable:
                         logging.info( "Script load_table.sh failed with %s error code "%( loadTable.returncode))
 
@@ -576,30 +644,31 @@ def load_single( q1,hostname,already_processed,total_table,log_q,qSuccess,qFail,
                 if (status == 'OK') and (loadstatus == 1):
                     logging.info(log_str)
 
-                    qSuccess.put((tableName,tableid,load_rowcount))
-                    updateLoadStatus(qSuccess,total_table,tables_count,fail_count,file_write_lock)
+                    updateLoadStatus(tableName, tableid, load_rowcount, total_table, tables_count, fail_count, file_write_lock)
 
                     elap_sec = common.elap_time(strt)
                     days, hours, minutes, seconds = common.calculate_time(elap_sec)
 
                     logging.info("%s"%(common.dividerline))
-                    logging.info("Time taken to load table = %s [tableID:%s] is : %d days, %d hours, %d minutes and %d seconds" % (tableName,tableid, days[0], hours[0], minutes[0], seconds[0]))
+                    logging.info("Time taken to load table = %s [tableID:%s] is : %d days, %d hours, %d minutes and %.2f seconds" % (tableName,tableid, days[0], hours[0], minutes[0], seconds[0]))
                     logging.info("%s"%(common.dividerline))
                 else:
                     logging.info("%s"%(common.dividerline))
                     logging.info("Loading of table :%s [tableID:%s] failed"%(tableName,tableid))
                     logging.info("%s"%(common.dividerline))
 
-                    qFail.put((tableName,tableid,None))
-                    updateFailureStatus(qFail,total_table,tables_count,fail_count,file_write_lock)
+                    updateFailureStatus(tableName, tableid, expected_rowcount, None, total_table, tables_count, fail_count, file_write_lock)
 
                     logging.info("%s"%newline)
+            else:
+                logging.info("Logging validation failure for table: %s [tableID:%s] to failure file." %(tableName,tableid))
+                updateFailureStatus(tableName, tableid, expected_rowcount, "Validation/Copy Failure", total_table, tables_count, fail_count, file_write_lock)
+                logging.info("%s"%newline)
 
         except Exception as exp:
             if str(exp) != "":
                 logging.error("Unexpected error reported while loading data: %s"%(str(exp)))
-                qFail.put((tableName,tableid,exp))
-                updateFailureStatus(qFail,total_table,tables_count,fail_count,file_write_lock)
+                updateFailureStatus(tableName, tableid, expected_rowcount, exp, total_table, tables_count, fail_count, file_write_lock)
                 logging.info("%s"%newline)
             else:
                 return
@@ -622,7 +691,7 @@ def recover_table_list():
     logging.info("%s Data Load started in resume mode"%(datetime.datetime.now()))
     logging.info("*************************************************")
 
-    load_file = codecs.open(HDLLoad_out,'r', common.charset)
+    load_file = open(HDLLoad_out,'r', encoding=common.get_valid_encoding(common.charset))
     lines = load_file.readlines()
     for line in lines:
         stripped_line = line.strip()
@@ -635,7 +704,7 @@ def recover_table_list():
     load_file.close()
 
     if os.path.exists(loadFailure_err_bkp):
-        failure_file = codecs.open(loadFailure_err_bkp,'r', common.charset)
+        failure_file = open(loadFailure_err_bkp,'r', encoding=common.get_valid_encoding(common.charset))
         lines = failure_file.readlines()
         for line in lines:
             stripped_line = line.strip()
@@ -648,7 +717,7 @@ def recover_table_list():
         failure_file.close()
 
     if os.path.exists(extractedTables_out):
-        extract_file = codecs.open(extractedTables_out,'r', common.charset)
+        extract_file = open(extractedTables_out,'r', encoding=common.get_valid_encoding(common.charset))
         lines = extract_file.readlines()
         for line in lines:
             stripped_line = line.strip()
@@ -660,15 +729,24 @@ def recover_table_list():
                 copied_tables.append(tbl[0].strip())
         extract_file.close()
 
+        # Tables that were extracted but have not yet been successfully loaded
         delta = [item for item in copied_tables  if item not in loaded_tables]
-        delta_in_success = [item for item in delta  if item not in failed_tables]
+        # Failed tables that still need to be retried (not already successfully loaded)
+        actual_failed_tables = [tbl for tbl in failed_tables if tbl not in loaded_tables] 
+        # New tables that were extracted, never failed, and not yet loaded
+        delta_in_success = [item for item in delta if item not in actual_failed_tables] 
         tables_already_loaded = len(loaded_tables)
         total_extracted_table = len(copied_tables)
 
         print("%s"%(common.dividerline))
         print("%s tables out of %s tables already successfully loaded by previous run of load utility."%(tables_already_loaded,total_extracted_table))
 
-        for i in failed_tables:
+        # De-duplicate failed tables to prevent same table being loaded multiple times
+        actual_failed_tables = list(dict.fromkeys(actual_failed_tables))
+
+        # Queue for previously failed tables (still not loaded)
+        queued_failed = set()
+        for i in actual_failed_tables:
             total_table.value = total_table.value + 1
             for line in lines:
                 stripped_line = line.strip()
@@ -677,10 +755,12 @@ def recover_table_list():
                 #validate length of tbl list, should always be 4
                 len_ext_tbl = len(tbl)
                 if len_ext_tbl == 4:
-                    if i == tbl[0].strip():
+                    if i == tbl[0].strip() and i not in queued_failed:
                         q1.put((i,tbl[2],tbl[1]))
+                        queued_failed.add(i)
 
-        if (not delta_in_success) and (not failed_tables):
+        # Queue for new tables (delta)
+        if (not delta_in_success) and (not actual_failed_tables):
             logging.info("All extracted tables are already processed for data load")
         else:
             for i in delta_in_success:
@@ -693,11 +773,12 @@ def recover_table_list():
                     len_ext_tbl = len(tbl)
                     if len_ext_tbl == 4:
                         if i == tbl[0].strip() and tbl[1] == 0:
-                            tables_count.value = tables_count.value + 1
-                            with codecs.open(HDLLoad_out, "a", common.charset) as f:
-                                f.write(tbl[0].strip()  + "," + tbl[2].strip() + ",0"  + newline)
-                                logging.info( "Adding entry in %s file %sfor table : %s [tableID:%s]"%(HDLLoad_out,newline,tbl[0].strip(),tbl[2].strip()))
-                            f.close()
+                            if tbl[0].strip() not in loaded_tables:
+                                tables_count.value = tables_count.value + 1
+                                with open(HDLLoad_out, "a", encoding=common.get_valid_encoding(common.charset)) as f:
+                                    f.write(tbl[0].strip()  + "," + tbl[2].strip() + ",0"  + newline)
+                                    logging.info( "Adding entry in %s file %sfor table : %s [tableID:%s]"%(HDLLoad_out,newline,tbl[0].strip(),tbl[2].strip()))
+                                f.close()
                         elif i == tbl[0].strip():
                             q2.put((i,tbl[2],tbl[1]))
     else:
@@ -709,7 +790,7 @@ def recover_table_list():
 def load_table_list():
     q = multiprocessing.Queue()
     if os.path.exists(extractedTables_out):
-        f = codecs.open(extractedTables_out,"r", common.charset)
+        f = open(extractedTables_out,'r', encoding=common.get_valid_encoding(common.charset))
         lines = f.readlines()
         for line in lines:
             stripped_line = line.strip()
@@ -721,7 +802,7 @@ def load_table_list():
                 total_table.value = total_table.value + 1
                 if tbl[1] == "0":
                     tables_count.value = tables_count.value + 1
-                    with codecs.open(HDLLoad_out, "a", common.charset) as f:
+                    with open(HDLLoad_out, "a", encoding=common.get_valid_encoding(common.charset)) as f:
                         f.write(tbl[0].strip() + "," + tbl[2].strip() +",0" + newline)
                         logging.info( "Adding entry in %s file %sfor table : %s [tableID:%s]"%(HDLLoad_out,newline,tbl[0].strip(),tbl[2].strip()))
                         logging.info("%s"%(common.dividerline))
@@ -742,7 +823,7 @@ def loaded_tables_count(f):
     if not os.path.isfile(HDLLoad_out):
         table_cnt = 0
     else:
-        with codecs.open(f, "r", common.charset) as f:
+        with open(f, "r", encoding=common.get_valid_encoding(common.charset)) as f:
             for line in f.readlines():
                 stripped_line = line.strip()
                 tbl = stripped_line.split(",")
@@ -776,7 +857,7 @@ def display_clidelete_command():
 def check_migration_status(f1,f2):
     extracted_table_list = list()
     iq_table_list = list()
-    with codecs.open(f1, "r", common.charset) as f:
+    with open(f1, "r", encoding=common.get_valid_encoding(common.charset)) as f:
         for line in f.readlines():
             line = line.rstrip('\n')
             splits = line.split(',')
@@ -795,7 +876,7 @@ def check_migration_status(f1,f2):
     else:
         loaded_table_list = list()
 
-        with codecs.open(f2, "r" , common.charset) as f:
+        with open(f2, "r", encoding=common.get_valid_encoding(common.charset)) as f:
             for line in f.readlines():
                 line = line.rstrip('\n')
                 splits = line.split(',')
@@ -819,75 +900,96 @@ def check_migration_status(f1,f2):
             logging.info("Please check %s file for loading failures. %sRerun Load Utility to load remaining tables."%(loadFailure_err,newline))
             logging.info("%s"%(common.double_divider_line))
 
-
-# Function which will do parallel load and load table data
 def load_main():
-    global q_listener,log_q,logger
+    global log_q, listener_q
 
     if not is_windows:
         log_q = None
 
     start = datetime.datetime.now()
-    hosts_list(common.coord_conn_num,common.coord_host,'Coordinator')
-    hosts_list(common.worker_conn_num,common.worker_host,'Worker')
+    hosts_list(common.coord_conn_num, common.coord_host, 'Coordinator')
+    hosts_list(common.worker_conn_num, common.worker_host, 'Worker')
 
     str1 = "Data load on data lake Relational Engine started."
     common.print_and_log(str1)
-    print("%s"%(common.dividerline))
-    print("Data Loading on data lake Relational Engine is in progress.%sFor details of tables loaded on data lake Relational Engine successfully, Please check file: %s%s"%(newline,newline,HDLLoad_out))
+    print("%s" % (common.dividerline))
+    print("Data Loading on data lake Relational Engine is in progress.%sFor details of tables loaded on data lake Relational Engine successfully, Please check file: %s%s" % (newline, newline, HDLLoad_out))
 
-    print("%s%s"%(newline,common.dividerline))
-    print("For Load progress, Please check file: %s%s"%(newline,load_schema_and_data_log))
-    print("%s"%(common.dividerline))
+    print("%s%s" % (newline, common.dividerline))
+    print("For Load progress, Please check file: %s%s" % (newline, load_schema_and_data_log))
+    print("%s" % (common.dividerline))
 
     load_table_q = multiprocessing.Queue()
     failed_table_q = multiprocessing.Queue()
-    qSuccess = multiprocessing.Queue()
-    qFail = multiprocessing.Queue()
     file_write_lock = multiprocessing.Lock()
 
-    if(resume_mode):
-        failed_table_q,load_table_q = recover_table_list()
+    if resume_mode:
+        failed_table_q, load_table_q = recover_table_list()
     else:
         load_table_q = load_table_list()
 
     process = []
 
-    #Start failed table processing
+    # Process failed tables only in resume mode
+    if resume_mode:
+        logging.info(f"Failed table queue size before processing: {failed_table_q.qsize()}")
+        for i in range(len(host_list)):
+            p = multiprocessing.Process(target=load_single, args=(failed_table_q, host_list[i], True, total_table, log_q, tables_count, fail_count, file_write_lock))
+            process.append(p)
+            p.start()
+        for p in process:
+            p.join()
+
+        # Retry mechanism for failed tables
+        retry_failed_tables(failed_table_q, host_list, total_table, log_q, tables_count, fail_count, file_write_lock)
+
+        # Remove backup file after failed table processing
+        if os.path.isfile(loadFailure_err_bkp):
+            os.remove(loadFailure_err_bkp)
+
+    # Start processing of tables which are yet to process
     for i in range(len(host_list)):
-        p = multiprocessing.Process(target=load_single, args=(failed_table_q,host_list[i],True,total_table,log_q,qSuccess,qFail,tables_count,fail_count,file_write_lock))
+        p = multiprocessing.Process(target=load_single, args=(load_table_q, host_list[i], False, total_table, log_q, tables_count, fail_count, file_write_lock))
         process.append(p)
         p.start()
     for p in process:
         p.join()
 
-    #Remove backup file after failed table processing
-    if os.path.isfile(loadFailure_err_bkp):
-        os.remove(loadFailure_err_bkp)
-
-    #Start processing of tables which are yet to process
-    for i in range(len(host_list)):
-        p = multiprocessing.Process(target=load_single, args=(load_table_q,host_list[i],False,total_table,log_q,qSuccess,qFail,tables_count,fail_count,file_write_lock))
-        process.append(p)
-        p.start()
-    for p in process:
-        p.join()
+    # Flush remaining log records by stopping the QueueListener (sends sentinel and joins handler thread)
+    if is_windows and listener_q:
+        listener_q.stop()
+        listener_q = None
 
     total_elap_sec = common.elap_time(start)
     days, hours, minutes, seconds = common.calculate_time(total_elap_sec)
 
-    str1 = "Data load on data lake Relational Engine completed. "
+    str1 = "Data load on data lake Relational Engine completed."
     common.print_and_log(str1)
-    str1 = "Total Data Load Time : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0])
+    str1 = "Total Data Load Time : %s%d days, %d hours, %d minutes and %.2f seconds" % (newline, days[0], hours[0], minutes[0], seconds[0])
     common.print_and_log(str1)
     loaded_tables_count(HDLLoad_out)
     check_migration_status(extractedTables_out, HDLLoad_out)
+
+def retry_failed_tables(failed_table_q, host_list, total_table, log_q, tables_count, fail_count, file_write_lock):
+    """
+    Retry mechanism for failed tables.
+    """
+    retry_process = []
+    logging.info(f"Retrying failed tables. Queue size: {failed_table_q.qsize()}")
+    for i in range(len(host_list)):
+        p = multiprocessing.Process(target=load_single, args=(failed_table_q, host_list[i], True, total_table, log_q, tables_count, fail_count, file_write_lock))
+        retry_process.append(p)
+        p.start()
+    for p in retry_process:
+        p.join()
+    logging.info("Retry mechanism for failed tables completed.")
 
 if __name__ == '__main__':
     host_list = []
     total_strt = datetime.datetime.now()
     global resume_mode
     resume_mode = False
+    listener_q = None
     get_inputs(config_file)
     if onlyschema == 'y':
         # Only schema load mode
@@ -898,10 +1000,7 @@ if __name__ == '__main__':
             strt = datetime.datetime.now()
             str1 = "%sDo you want to %sR - Restart schema load%sS - Skip schema load in resume mode? (R/S): " % (newline, newline, newline)
             if resume_mode:
-                if(sys.version[0:2] == '2.'):
-                    val = str(raw_input(str1))
-                else:
-                    val = str(input(str1))
+                val = str(input(str1))
                 if val.lower() == 'r':
                     load_schema(1)
                 elif val.lower() != 's':
@@ -910,7 +1009,7 @@ if __name__ == '__main__':
                 load_schema(1)
             elaptime = common.elap_time(strt)
             days, hours, minutes, seconds = common.calculate_time(elaptime)
-            str1 = "Time taken in Schema Load : %s%d days, %d hours, %d minutes and %d seconds" % (newline, days[0], hours[0], minutes[0], seconds[0])
+            str1 = "Time taken in Schema Load : %s%d days, %d hours, %d minutes and %.2f seconds" % (newline, days[0], hours[0], minutes[0], seconds[0])
             common.print_and_log(str1)
 
     elif onlydata == 'y':
@@ -938,10 +1037,7 @@ if __name__ == '__main__':
             strt = datetime.datetime.now()
             str1 = "%sDo you want to %sR - Restart schema load%sS - Skip schema load in resume mode? (R/S): " % (newline, newline, newline)
             if resume_mode:
-                if(sys.version[0:2] == '2.'):
-                    val = str(raw_input(str1))
-                else:
-                    val = str(input(str1))
+                val = str(input(str1))
                 if val.lower() == 'r':
                     load_schema(1)
                 elif val.lower() != 's':
@@ -950,7 +1046,7 @@ if __name__ == '__main__':
                 load_schema(1)
             elaptime = common.elap_time(strt)
             days, hours, minutes, seconds = common.calculate_time(elaptime)
-            str1 = "Time taken in Schema Load : %s%d days, %d hours, %d minutes and %d seconds" % (newline, days[0], hours[0], minutes[0], seconds[0])
+            str1 = "Time taken in Schema Load : %s%d days, %d hours, %d minutes and %.2f seconds" % (newline, days[0], hours[0], minutes[0], seconds[0])
             common.print_and_log(str1)
 
         # Loop 2: Data Load
@@ -966,7 +1062,14 @@ if __name__ == '__main__':
     print("Load Utility completed.%sPlease check file for details :%s%s"%(newline,newline,load_schema_and_data_log))
     total_elaptime = common.elap_time(total_strt)
     days, hours, minutes, seconds = common.calculate_time(total_elaptime)
-    string = "Total Time taken in load utility : %s%d days, %d hours, %d minutes and %d seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0])
+    string = "Total Time taken in load utility : %s%d days, %d hours, %d minutes and %.2f seconds" % ( newline, days[0], hours[0], minutes[0], seconds[0])
     common.print_and_log(string)
     print("%s"%(common.dividerline))
     logging.info("%s"%(common.dividerline))
+
+    # Stop the QueueListener to flush remaining log records on Windows
+    try:
+        if is_windows and listener_q:
+            listener_q.stop()
+    except Exception as e:
+        logging.debug(f"Error stopping QueueListener: {e}")
