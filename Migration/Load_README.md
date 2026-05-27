@@ -7,7 +7,7 @@ The Load process involves the following operation:
 
 #### Prerequisites
 The following should be provisioned/installed before the load utilities are run:
-    - Python 3.10.x and Above
+    - Python 3.11.x and Above
 
 **_NOTE:_**
 - You may need to install additional Python modules required by specific parts of the load scripts.
