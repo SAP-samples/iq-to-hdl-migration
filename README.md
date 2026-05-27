@@ -49,8 +49,6 @@ It will have following files:
   
 - Migration_README.md: README file for the Migration utility. Please refer to the SAP HANA Cloud, Data Lake Migration Guide of assistance on running the utility.
 
-- copy_data_to_hdlfs.sh: Shell script to be used by copy_hdlfs.py with necessary parameters and environment setup.
-
 - copy_hdlfs.py: Python utility to recursively copy extracted data files from local storage to HDLFS using REST APIs.
 
 - load_schema.sh: Shell script used by the load_schema_and_data.py utility to load the database schema into data lake Relational Engine.
@@ -62,21 +60,19 @@ It will have following files:
 - migration.py: Python utility to extract schema and data from SAP IQ.
  
 ## Requirements
-- Python 3 (3.10.x or higher version)
+- Python 3 (3.11.x or higher version)
 - Pyodbc
 - Minimum Supported IQ Server version - 16.1_SP01
 - Paramiko(Python module)
 
 ## Download and Installation
-Install python 3.10.x or higher version and pyodbc. 
+Install python 3.11.x or higher version and pyodbc. 
 Clone this repo
 You can then run Premigration and Migration utilities.
 
 ## Known Issues
 
 ## Limitations
-Due to a known HDLFS limitation, the `hdlfscli` utility does not support copying data file larger than 95 GB.
-At present, no official workaround exists for windows platform but an alternate solution is in progress which will be fixed in next release.
 
 ## How to obtain support
 [Create an issue](https://github.com/SAP-samples/iq-to-hdl-migration/issues) in this repository if you find a bug or have questions about the content.
