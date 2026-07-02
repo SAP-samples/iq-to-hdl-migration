@@ -9,7 +9,7 @@
 "IQ_Host_Login_Pwd":"<Optional: SAP IQ host login password to establish an ssh connection if your installations of SAP IQ Server and the migration utility (17.1 data lake client installation) are on different hosts.Please provide the value or empty string as shown in ReadMe files.>",
 "ENC": "<Optional: ENC string based on Encryption setting on SAP IQ server (None/Simple/TLS(<TLS Options>)).Please provide the value or empty string as shown in ReadMe files.>",
 
-"IQ_Version": "<Your major SAP IQ version in use: Should be 16.1>",
+"IQ_Version": "<Your major SAP IQ version in use: Should be 16.1 or 16.2>",
 "IQ_Server_Install_Path": "<Path of SAP IQ Server installation directory>",
 "Datalake_Client_Install_Path": "<Path of 17.1 SAP data lake client installation directory>"
 }
