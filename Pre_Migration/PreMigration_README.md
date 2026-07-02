@@ -3,7 +3,7 @@ The premigration utility identifies incompatible features, configuration informa
 
 #### Prerequisite
 The following should be installed on the host on which the migration utilities will be run:
-    - Python 3.10.x and Above
+    - Python 3.11.x and Above
     - Pyodbc
     - Minimum Supported IQ Server version - 16.1_SP01(Older SAP IQ versions must be upgraded to atleast 16.1_SP01 before migration)
 
