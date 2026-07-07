@@ -262,9 +262,6 @@ def verify_iq_version(conn):
     version = re.search('16\.[12]', ver)
     if not version:
         action_required_list.append(('Current_IQ_Version not 16.1/16.2', f'Upgrade required as Parallelization in extraction is not supported in below IQ versions.'))
-    #if 'SAP IQ/16.0.' in ver:
-        #Document link needs to be updated with HDLFS not supported for IQ below 16.0 version
-        #features_list.append(('Current_IQ_Version', f'Not Supported with HDLFS, Upgrade to 16.1_SP01 required.'))
     cursor.close()
 
     elap_sec = common.elap_time(strt)
