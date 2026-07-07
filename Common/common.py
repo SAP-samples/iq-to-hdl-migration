@@ -123,10 +123,8 @@ def get_inputs(config_file,util):
             sys.exit("Error: IQ_Version needs to be set in %s file"%config_file)
         if version in ("16.1", "16.2"):
             driver = "libdbodbc17.so"
-        elif version == "16.0":
-            driver = "libdbodbc16.so"
         else:
-            sys.exit("Error: Invalid IQ_Version in %s file. Supported values : [16.0, 16.1 or 16.2]"%(config_file))
+            sys.exit("Error: Invalid IQ_Version in %s file. Supported values : [16.1 or 16.2]"%(config_file))
 
     global driv
     driv = platform.system()
