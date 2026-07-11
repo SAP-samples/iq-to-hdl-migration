@@ -259,7 +259,7 @@ def verify_iq_version(conn):
     # IQ version verification
     cursor.execute("select @@version")
     ver = cursor.fetchone()[0]
-    version = re.search('16\.[12]', ver)
+    version = re.search(r'16\.[12]', ver)
     if not version:
         action_required_list.append(('Current_IQ_Version not 16.1/16.2', f'Upgrade required as Parallelization in extraction is not supported in below IQ versions.'))
     cursor.close()
