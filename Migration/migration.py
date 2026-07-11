@@ -264,7 +264,7 @@ def get_inputs(config_file):
                 if not is_windows:
                     logging.basicConfig(filename=migration_log, filemode='w', format='%(message)s', level=logging.INFO)
                 else:
-                    listener_q,log_q,logger = logger_init('w')
+                    listener_q,log_q,logger = common.logger_init(migration_log, 'w')
                 logging.info("%s*************************************************************"%newline)
                 logging.info("[%s] : Migration Utility restarted. %sDeleted existing %s folder."%(datetime.datetime.now(),newline,migrationpath))
                 logging.info("*************************************************************")
@@ -277,7 +277,7 @@ def get_inputs(config_file):
             if not is_windows:
                 logging.basicConfig(filename=migration_log, filemode='a', format='%(message)s', level=logging.INFO)
             else:
-                listener_q,log_q,logger = logger_init('a')
+                listener_q,log_q,logger = common.logger_init(migration_log, 'a')
             logging.info("%s%s%s%s"%(newline,newline,newline,common.double_divider_line))
             logging.info("[%s] : Migration Utility started in Resume mode."%(datetime.datetime.now()))
             logging.info("%s"%(common.double_divider_line))
@@ -291,7 +291,7 @@ def get_inputs(config_file):
         if not is_windows:
             logging.basicConfig(filename=migration_log, filemode='w', format='%(message)s', level=logging.INFO)
         else:
-            listener_q,log_q,logger = logger_init('w')
+            listener_q,log_q,logger = common.logger_init(migration_log, 'w')
         logging.info("%s*************************************************************"%newline)
         if onlyschema == 'y':
             logging.info("[%s] : Schema Unload Started."%(datetime.datetime.now()))
@@ -327,47 +327,6 @@ def get_inputs(config_file):
     elap_sec = common.elap_time(strt)
     logging.info("%s"%(common.dividerline))
     logging.info("Reading and Verification of config file : %s%s completed in %s seconds"%(newline,config_file,elap_sec))
-
-# Initialize logger with handler and queue the records and send them to handler
-# This function is applicable only for Windows OS as
-# On Windows child processes will only inherit the level of the parent process’s logger –
-# any other customization of the logger will not be inherited." Subprocesses won't inherit the handler,
-# and  can't pass it explicitly because it's not pickleable
-def logger_init(file_mode):
-    global val
-    q = multiprocessing.Queue()
-    # this is the handler for all log records
-    file_handler = logging.StreamHandler()
-    if os.path.isdir(migrationpath):
-        # val 'r' indicates restart mode and 'e' indicates resume mode
-        if val.lower() == "r":
-            try:
-                file_handler = logging.FileHandler(migration_log,mode=file_mode)
-
-            except OSError as e:
-                print("Error: %s : %s" % (migrationpath, e.strerror))
-
-        elif val.lower() == "e":
-            file_handler = logging.FileHandler(migration_log,mode=file_mode)
-    else:
-        file_handler = logging.FileHandler(migration_log,mode=file_mode)
-
-
-    # ql gets records from the queue and sends them to the handler
-    record_q = QueueListener(q, file_handler)
-    record_q.start()
-
-    logger = logging.getLogger()
-    formatter    = logging.Formatter('%(message)s')
-    file_handler.setFormatter(formatter)
-    # add file handler to logger
-    logger.addHandler(file_handler)
-    logger.setLevel(logging.INFO)
-    # add the handler to the logger so records from this process are handled
-    logger.addHandler(file_handler)
-
-    return record_q, q ,logger
-
 
 # Function to check if we are connected to MPX coordinator or not
 def mpx_verify(connectstr):
@@ -2344,7 +2303,6 @@ def extract_single(q, connstr_port,total_table,batch,log_q,tables_count,fail_cou
                 logging.error("Unexpected error in extract_single() reported while extracting data: %s"%str(exp))
                 updateFailureStatus(owner, tableName, tableid, exp, batch, total_table, tables_count, fail_count, file_write_lock)
             else:
-                logging.warning("Empty exception caught in extract_single() - queue may be exhausted")
                 return
 
 # For version 16.0 SP11 if a table has LOB datatypes then extraction should be done using BFILE() method
