@@ -226,7 +226,8 @@ def get_inputs(config_file):
 
     if is_windows:
         global listener_q,log_q,logger
-        listener_q,log_q,logger = logger_init()
+        mode = 'a' if (resume_mode or onlydata == 'y') else 'w'
+        listener_q,log_q,logger = common.logger_init(load_schema_and_data_log, mode)        
     else:
         if (resume_mode or onlydata == 'y'):
             logging.basicConfig(filename=load_schema_and_data_log, filemode='a', format='%(message)s', level=logging.INFO)
@@ -263,36 +264,6 @@ def get_inputs(config_file):
     elif common.charset.upper() in ('EUC_TAIWAN', 'EUC-TW'):
         str1 = "Warning: Python has no codec for charset '%s'. Using latin-1 passthrough for schema files and UTF-8 for internal files."%common.charset
         common.print_and_log(str1)
-
-# Initialize logger with handler and queue the records and send them to handler
-# This function is applicable only for Windows OS as
-# On Windows child processes will only inherit the level of the parent process’s logger –
-# any other customization of the logger will not be inherited." Subprocesses won't inherit the handler,
-# and  can't pass it explicitly because it's not pickleable
-def logger_init():
-    global resume_mode
-    q = multiprocessing.Queue()
-    # this is the handler for all log records
-    file_handler = logging.StreamHandler()
-    if (resume_mode or onlydata == 'y'):
-        file_handler = logging.FileHandler(load_schema_and_data_log,mode='a')
-    else:
-        file_handler = logging.FileHandler(load_schema_and_data_log,mode='w')
-
-    # ql gets records from the queue and sends them to the handler
-    ql = QueueListener(q, file_handler)
-    ql.start()
-
-    logger = logging.getLogger()
-    formatter    = logging.Formatter('%(message)s')
-    file_handler.setFormatter(formatter)
-    # add file handler to logger
-    logger.addHandler(file_handler)
-    logger.setLevel(logging.INFO)
-    # add the handler to the logger so records from this process are handled
-    logger.addHandler(file_handler)
-
-    return ql, q ,logger
 
 # validate required directories and files exists to proceed with load
 def validate_dir_and_files():
@@ -478,11 +449,12 @@ def validate_upload_hdlfs(tableid):
 
     return upload_success
 
-def get_rowcount(owner,tableName):
-    ENC="tls(tls_type=rsa;direct=yes)"
-    conn = sqlanydb.connect( uid=common.user, pwd=common.password, host=common.coord_host, enc=ENC )
+def get_rowcount(owner, tableName):
+    ENC = "tls(tls_type=rsa;direct=yes)"
+    conn = sqlanydb.connect( uid=common.user, pwd=common.password, host=common.coord_host, enc=ENC,charset=common.get_valid_encoding(common.charset))
     cursor = conn.cursor()
-    cursor.execute("""select count(*) from "%s"."%s";"""%(owner,tableName))
+    query = 'SELECT COUNT(*) FROM "%s"."%s"' % (owner, tableName)
+    cursor.execute(query)
     row_count = cursor.fetchone()[0]
     cursor.close()
     conn.close()
