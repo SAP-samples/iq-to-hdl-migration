@@ -16,6 +16,8 @@ import json
 import sys,getopt
 import datetime
 from sys import byteorder
+from logging.handlers import QueueListener
+import multiprocessing
 
 global double_divider_line
 double_divider_line = "=========================================================================================="
@@ -71,6 +73,39 @@ def calculate_time(elap_sec):
     seconds = divmod(minutes[1], 1)               # Use remainder of minutes to calc seconds
 
     return days, hours, minutes, seconds
+
+# Use UTF-8 encoded log files for cross-platform compatibility.
+# Windows often uses a non-UTF-8 default encoding (e.g. cp1252), which
+# cannot encode all Unicode characters. Specifying UTF-8 with a fallback
+# error handler prevents logging failures for table names containing
+# multibyte or supplementary Unicode characters.
+def logger_init(log_file, file_mode):
+    #Initialize multiprocessing-safe logger for Windows.
+    #Creates a UTF-8 encoded FileHandler and QueueListener.
+
+    q = multiprocessing.Queue()
+
+    file_handler = logging.FileHandler(
+        log_file,
+        mode=file_mode,
+        encoding="utf-8",
+        errors="backslashreplace"
+    )
+
+    formatter = logging.Formatter("%(message)s")
+    file_handler.setFormatter(formatter)
+
+    ql = QueueListener(q, file_handler)
+    ql.start()
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # Avoid adding duplicate handlers
+    if file_handler not in logger.handlers:
+        logger.addHandler(file_handler)
+
+    return ql, q, logger
 
 # Read the config.json file and get all values
 def get_inputs(config_file,util):
@@ -579,3 +614,4 @@ def load_inputs(config_file,util):
     charset = cursor.fetchone()[0]
     cursor.close()
     conn.close()
+    
